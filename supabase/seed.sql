@@ -1,0 +1,1 @@
+-- No seed data yet. Use Supabase Studio or SQL to add sample gyms and members.

@@ -1,0 +1,199 @@
+:root {
+  color-scheme: light;
+  font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  background: #f6f8fb;
+  color: #111827;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  min-height: 100vh;
+}
+
+.page-shell {
+  max-width: 980px;
+  margin: 0 auto;
+  padding: 40px 20px;
+}
+
+.card {
+  background: #ffffff;
+  border-radius: 18px;
+  box-shadow: 0 12px 30px rgba(15, 23, 42, 0.08);
+  padding: 28px;
+  margin-bottom: 24px;
+}
+
+.blurred {
+  opacity: 0.45;
+  pointer-events: none;
+}
+
+.lockout-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(15, 23, 42, 0.8);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+  z-index: 40;
+}
+
+.lockout-card {
+  background: white;
+  border-radius: 18px;
+  padding: 32px;
+  max-width: 520px;
+  width: 100%;
+  text-align: center;
+}
+
+.upi-box {
+  margin: 20px auto;
+  max-width: 320px;
+  padding: 18px;
+  border-radius: 16px;
+  background: #f3f4f6;
+  border: 1px dashed #d1d5db;
+}
+
+.small-text {
+  color: #6b7280;
+}
+
+h1,
+h2 {
+  margin: 0 0 16px;
+}
+
+input,
+select,
+button {
+  font: inherit;
+}
+
+input,
+select {
+  width: 100%;
+  padding: 12px 14px;
+  border: 1px solid #d1d5db;
+  border-radius: 12px;
+  margin-bottom: 14px;
+}
+
+button {
+  border: none;
+  border-radius: 12px;
+  padding: 12px 18px;
+  background: #111827;
+  color: white;
+  cursor: pointer;
+}
+
+button.secondary {
+  background: #f3f4f6;
+  color: #111827;
+}
+
+button:hover {
+  opacity: 0.95;
+}
+
+.auth-card,
+.status-bar {
+  display: grid;
+  gap: 12px;
+}
+
+.status-bar {
+  align-items: center;
+  grid-template-columns: 1fr auto;
+}
+
+..status-text {
+  color: #4b5563;
+  margin-top: 12px;
+}
+
+.debug-text {
+  color: #6b7280;
+  font-size: 0.9rem;
+  margin-top: 8px;
+  word-break: break-all;
+}
+
+.form-row {
+  display: grid;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.button-row {
+  display: flex;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-bottom: 16px;
+}
+
+.button-row button {
+  flex: 1;
+  min-width: 120px;
+}
+
+button.active {
+  background: #2563eb;
+}
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+thead th {
+  text-align: left;
+  font-weight: 700;
+  padding: 12px 10px;
+  border-bottom: 1px solid #e5e7eb;
+}
+
+td,
+th {
+  padding: 12px 10px;
+}
+
+tbody tr:nth-child(even) {
+  background: #f9fafb;
+}
+
+.member-actions {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.wa-button {
+  display: inline-block;
+  padding: 10px 14px;
+  border-radius: 10px;
+  background: #24b855;
+  color: white;
+  text-decoration: none;
+}
+
+@media (max-width: 720px) {
+  .status-bar,
+  .form-row,
+  .member-actions {
+    display: grid;
+  }
+}
