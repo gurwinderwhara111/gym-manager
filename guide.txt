@@ -1,0 +1,104 @@
+# High-Performance Autonomous Engineering System Guide
+
+To replicate the "InkBoost" system in any project for the best results with gemma-4-31b-it and opencode, create the following file structure and implement these operational rules.
+
+## 📂 Required File Structure
+
+Create these files in the root directory of your project:
+
+### 1. AGENTS.md (The "Brain")
+Contains the operational rules. Copy the content from the "Operational Rules" section below into this file.
+
+### 2. ACTIVE_CONTEXT.md (The "Now")
+Purpose: Tracks the immediate focus.
+Template:
+# Active Context
+## Current Task
+[What are you doing right now?]
+## Current Blockers
+[What is stopping progress?]
+## Architecture Constraints
+[Any rules about how the code must be written?]
+## Active Hypothesis
+[What do you believe is the solution to the current problem?]
+## Current Priorities
+1. [Priority 1]
+2. [Priority 2]
+
+### 3. REPORT.md (The "Snapshot")
+Purpose: High-level project status.
+Template:
+# Status Report
+## Current State Snapshot
+[Current version, active branches, or system state]
+## Completed Work
+- [Item 1]
+## Remaining Work
+- [Item 1]
+## Blockers
+- [None/List]
+## Current Hypothesis
+[Overall project strategy]
+## Verification Status
+[Pending/Pass/Fail]
+
+### 4. CURRENT_SPRINT.md (The "Goal")
+Purpose: Defines the current milestone.
+Template:
+# Current Sprint: [Sprint Name]
+## Objective
+[Clear, high-level goal]
+## Boundaries
+- [What is NOT included in this sprint]
+## Success Criteria
+- [Measurable result 1]
+- [Measurable result 2]
+
+### 5. CONTEXT_AUDIT.md (The "Audit")
+Purpose: Ensures the agent is following all constraints.
+Template:
+# Context Audit
+## Active Instruction Sources
+- [List files like AGENTS.md, GOALS.md, etc.]
+## Loaded Operational Constraints
+- [e.g., Rate limits, specific model versions]
+## Conflicting Instructions
+- [Any contradictions found in the docs]
+
+### 6. Memory Directory (`/memory`)
+Create the following folders inside `/memory`:
+- `memory/active/`: General active notes.
+- `memory/architecture/`: Files like `decisions.md` and `overview.md`.
+- `memory/archived/`: Resolved issues and old context.
+- `memory/failures/`: Log of every major failure (Problem -> Root Cause -> Solution).
+- `memory/sessions/`: Notes for specific sessions.
+
+---
+
+## ⚙️ Operational Rules (Put these in AGENTS.md)
+
+### 🚀 Session Start
+Before ANY task, the agent MUST:
+1. Read Hot Context: `AGENTS.md`, `ACTIVE_CONTEXT.md`, `REPORT.md`, `CURRENT_SPRINT.md`.
+2. Analyze: Unfinished tasks, blockers, and hypotheses.
+3. Audit: Run a context audit and record it in `CONTEXT_AUDIT.md`.
+4. Summarize: Provide a concise summary of understanding before starting.
+
+### 🛠 Execution Loop
+`analyze` → `plan` → `implement` → `verify` → `update memory/report` → `structured commit` → `continue`
+
+### 🏁 Git & Verification
+- **Verification**: Never claim success without running `lint`, `typecheck`, or `tests`.
+- **Commit Strategy**: Commit ONLY after Build, Lint, and Critical tests PASS.
+- **Commit Format**: `type(scope): short description`
+- **Commit Body**: Include "Completed", "Verification", and "Remaining" sections.
+
+### 🧠 Memory Management
+- Use `ACTIVE_CONTEXT.md` for immediate tasks.
+- Move resolved issues to `memory/archived/`.
+- Record every failure in `memory/failures/` to avoid repeating mistakes.
+
+### 💎 Code Quality
+- **Surgical Edits**: Minimal, targeted changes over large refactors.
+- **Correctness > Speed**: Never sacrifice maintainability for speed.
+- **Commenting**: Explain WHY, not WHAT.

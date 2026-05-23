@@ -44,6 +44,7 @@ export default function Home() {
   const [memberProfile, setMemberProfile] = useState<Member | null>(null);
   const [members, setMembers] = useState<Member[]>([]);
   const [gymName, setGymName] = useState("");
+  const [viewMode, setViewMode] = useState<"expiring" | "dues">("expiring");
   const [newMember, setNewMember] = useState({
     member_name: "",
     phone_number: "",
@@ -53,6 +54,7 @@ export default function Home() {
   });
   const [startDateMode, setStartDateMode] = useState<"today" | "tomorrow" | "custom">("today");
   const [customStartDate, setCustomStartDate] = useState("");
+
 
   useEffect(() => {
     const initAuth = async () => {
@@ -279,9 +281,19 @@ export default function Home() {
     return `https://wa.me/91${phone}?text=${encodeURIComponent(dueMessage)}`;
   };
 
-  const trialDays = gym
-    ? Math.floor((Date.now() - new Date(gym.trial_start_date).getTime()) / (1000 * 60 * 60 * 24))
-    : 0;
+    const activeMembers = members.filter((m) => {
+      return new Date(m.expiry_date) >= new Date(new Date().toISOString().slice(0, 10));
+    });
+    const expiredMembers = members.filter((m) => {
+      return new Date(m.expiry_date) < new Date(new Date().toISOString().slice(0, 10));
+    });
+
+    const trialDays = gym
+      ? Math.floor((Date.now() - new Date(gym.trial_start_date).getTime()) / (1000 * 60 * 60 * 24))
+      : 0;
+
+
+
   const trialExpired = gym ? trialDays >= 15 : false;
   const daysLeft = gym ? Math.max(0, 14 - trialDays) : 14;
 
@@ -456,46 +468,70 @@ export default function Home() {
             <button onClick={handleAddMember}>Save member</button>
           </section>
 
-          <section className="card">
-            <h2>Expiring / Due Members</h2>
-            {members.length === 0 ? (
-              <p>No members added yet.</p>
-            ) : (
-              <table>
-                <thead>
-                  <tr>
-                    <th>Name</th>
-                    <th>Phone</th>
-                    <th>Expiry</th>
-                    <th>Due</th>
-                    <th>Action</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {members.map((member) => {
-                    const daysLeft = getDaysBetween(new Date().toISOString().slice(0, 10), member.expiry_date);
-                    const showRow = member.pending_due > 0 || daysLeft <= 5;
-                    if (!showRow) return null;
+           <section className="card">
+             <h2>Membership Status</h2>
+             <div style={{ marginBottom: "30px" }}>
+               <h3 style={{ color: "green" }}>✅ Currently Running (Active)</h3>
+               {activeMembers.length === 0 ? (
+                 <p className="small-text">No active members.</p>
+               ) : (
+                 <table>
+                   <thead>
+                     <tr>
+                       <th>Name</th>
+                       <th>Phone</th>
+                       <th>Expiry</th>
+                       <th>Action</th>
+                     </tr>
+                   </thead>
+                   <tbody>
+                     {activeMembers.map((member) => (
+                       <tr key={member.id}>
+                         <td>{member.member_name}</td>
+                         <td>{member.phone_number}</td>
+                         <td>{formatDate(member.expiry_date)}</td>
+                         <td className="member-actions">
+                           <button onClick={() => handleRenew(member)}>Renew</button>
+                         </td>
+                       </tr>
+                     ))}
+                   </tbody>
+                 </table>
+               )}
+             </div>
 
-                    return (
-                      <tr key={member.id}>
-                        <td>{member.member_name}</td>
-                        <td>{member.phone_number}</td>
-                        <td>{formatDate(member.expiry_date)}</td>
-                        <td>₹{member.pending_due}</td>
-                        <td className="member-actions">
-                          <a className="wa-button" href={getWhatsappLink(member)} target="_blank" rel="noreferrer">
-                            WhatsApp
-                          </a>
-                          <button onClick={() => handleRenew(member)}>Renew +30 Days</button>
-                        </td>
-                      </tr>
-                    );
-                  })}
-                </tbody>
-              </table>
-            )}
-          </section>
+             <div>
+               <h3 style={{ color: "red" }}>❌ Out of Subscription (Expired)</h3>
+               {expiredMembers.length === 0 ? (
+                 <p className="small-text">No expired members.</p>
+               ) : (
+                 <table>
+                   <thead>
+                     <tr>
+                       <th>Name</th>
+                       <th>Phone</th>
+                       <th>Expiry</th>
+                       <th>Action</th>
+                     </tr>
+                   </thead>
+                   <tbody>
+                     {expiredMembers.map((member) => (
+                       <tr key={member.id}>
+                         <td>{member.member_name}</td>
+                         <td>{member.phone_number}</td>
+                         <td>{formatDate(member.expiry_date)}</td>
+                         <td className="member-actions">
+                           <button onClick={() => handleRenew(member)}>Renew</button>
+                         </td>
+                       </tr>
+                     ))}
+                   </tbody>
+                 </table>
+               )}
+             </div>
+           </section>
+
+
         </>
       )}
     </main>

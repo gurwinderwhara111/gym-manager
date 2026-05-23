@@ -5,16 +5,14 @@ let lastUrl: string | null = null;
 
 // Helper to get the current Supabase URL based on environment
 function getCurrentSupabaseUrl(): string {
-  let supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL || "";
-  
   if (typeof window !== "undefined") {
     const isCodespaces = window.location.hostname.includes("app.github.dev");
-    if (isCodespaces && process.env.NEXT_PUBLIC_SUPABASE_URL_CODESPACES) {
-      supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL_CODESPACES;
+    if (isCodespaces) {
+      // Use the Next.js rewrite proxy to avoid "Private Port" 401 errors in Codespaces
+      return `${window.location.origin}/supabase-api`;
     }
   }
-
-  return supabaseUrl;
+  return process.env.NEXT_PUBLIC_SUPABASE_URL || "";
 }
 
 // Create or recreate the client if URL changes
