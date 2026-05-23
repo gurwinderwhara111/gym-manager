@@ -21,11 +21,19 @@ type Member = {
   expiry_date: string;
   monthly_fee: number;
   pending_due: number;
+  advance_balance: number;
   member_email: string | null;
 };
 
 function formatDate(value: string) {
   return new Date(value).toLocaleDateString("en-IN");
+}
+
+function getISTDate() {
+  const now = new Date();
+  const istOffset = 5.5 * 60 * 60 * 1000;
+  const istDate = new Date(now.getTime() + istOffset);
+  return istDate.toISOString().slice(0, 10);
 }
 
 function getDaysBetween(startDate: string, endDate: string) {
@@ -44,7 +52,10 @@ export default function Home() {
   const [memberProfile, setMemberProfile] = useState<Member | null>(null);
   const [members, setMembers] = useState<Member[]>([]);
   const [gymName, setGymName] = useState("");
-  const [viewMode, setViewMode] = useState<"expiring" | "dues">("expiring");
+  const [viewMode, setViewMode] = useState<"home" | "expiring" | "dues" | "all">("home");
+
+  const [totalCollections, setTotalCollections] = useState(0);
+  const [searchQuery, setSearchQuery] = useState("");
   const [newMember, setNewMember] = useState({
     member_name: "",
     phone_number: "",
@@ -54,7 +65,6 @@ export default function Home() {
   });
   const [startDateMode, setStartDateMode] = useState<"today" | "tomorrow" | "custom">("today");
   const [customStartDate, setCustomStartDate] = useState("");
-
 
   useEffect(() => {
     const initAuth = async () => {
@@ -122,6 +132,20 @@ export default function Home() {
       .order("expiry_date", { ascending: true });
 
     setMembers((data ?? []) as Member[]);
+    await loadCollections(gymId);
+  };
+
+  const loadCollections = async (gymId: string) => {
+    const currentMonth = getISTDate().slice(0, 7); // YYYY-MM
+    const { data } = await supabase
+      .from("payments")
+      .select("amount_paid")
+      .eq("gym_id", gymId)
+      .gte("payment_date", `${currentMonth}-01`)
+      .lte("payment_date", `${currentMonth}-31`);
+
+    const total = (data ?? []).reduce((sum, p) => sum + Number(p.amount_paid), 0);
+    setTotalCollections(total);
   };
 
   const handleLogin = async () => {
@@ -229,70 +253,143 @@ export default function Home() {
 
     const startDate = selectedStartDate;
     const expiryDate = new Date(startDate.getTime() + 30 * 24 * 60 * 60 * 1000);
+    const istToday = getISTDate();
 
-    const { error } = await supabase.from("members").insert([
+    const advanceBalance = Math.max(0, paid - fee);
+    const pendingDue = Math.max(0, fee - paid);
+
+    const { error: memberError } = await supabase.from("members").insert([
       {
         gym_id: gym.id,
         member_name: newMember.member_name.trim(),
         phone_number: newMember.phone_number.trim(),
         category: newMember.category,
-        start_date: startDate.toISOString().slice(0, 10),
+        start_date: istToday,
         expiry_date: expiryDate.toISOString().slice(0, 10),
         monthly_fee: fee,
-        pending_due: Math.max(0, fee - paid),
+        pending_due: pendingDue,
+        advance_balance: advanceBalance,
       },
     ]);
 
-    if (error) {
-      setStatusMessage(error.message);
+    if (memberError) {
+      setStatusMessage(memberError.message);
       return;
     }
 
+    const { data: memberData } = await supabase
+      .from("members")
+      .select("id")
+      .eq("member_name", newMember.member_name.trim())
+      .eq("gym_id", gym.id)
+      .maybeSingle();
+
+    if (memberData && paid > 0) {
+      await supabase.from("payments").insert([
+        {
+          gym_id: gym.id,
+          member_id: memberData.id,
+          amount_paid: paid,
+          payment_date: istToday,
+        },
+      ]);
+    }
+
     setNewMember({ member_name: "", phone_number: "", category: "Weight Training", monthly_fee: "0", amount_paid: "0" });
-    setStatusMessage("Member added.");
+    setStatusMessage("Member added successfully.");
     await loadMembers(gym.id);
   };
 
   const handleRenew = async (member: Member) => {
+    const istToday = getISTDate();
     const currentExpiry = new Date(member.expiry_date);
     const newExpiry = new Date(currentExpiry.getTime() + 30 * 24 * 60 * 60 * 1000);
-    const { error } = await supabase
+    
+    let feeToPay = member.monthly_fee;
+    let balanceDeduction = 0;
+    
+    const { data: mData } = await supabase.from("members").select("advance_balance").eq("id", member.id).single();
+    const currentAdvance = mData?.advance_balance || 0;
+    
+    if (currentAdvance > 0) {
+      balanceDeduction = Math.min(currentAdvance, feeToPay);
+      feeToPay -= balanceDeduction;
+    }
+
+    const { error: updateError } = await supabase
       .from("members")
-      .update({ expiry_date: newExpiry.toISOString().slice(0, 10) })
+      .update({ 
+        expiry_date: newExpiry.toISOString().slice(0, 10),
+        advance_balance: currentAdvance - balanceDeduction
+      })
       .eq("id", member.id);
 
-    if (error) {
-      setStatusMessage(error.message);
+    if (updateError) {
+      setStatusMessage(updateError.message);
       return;
     }
+
+    await supabase.from("payments").insert([
+      {
+        gym_id: gym!.id,
+        member_id: member.id,
+        amount_paid: feeToPay,
+        payment_date: istToday,
+      },
+    ]);
 
     await loadMembers(gym!.id);
     setStatusMessage(`Renewed ${member.member_name} for 30 days.`);
   };
 
-  const getWhatsappLink = (member: Member) => {
-    const phone = member.phone_number.replace(/\D/g, "");
-    const dueMessage = member.pending_due > 0
-      ? `Sat Sri Akal ${member.member_name}, your pending due is Rs.${member.pending_due}. Please clear it today.`
-      : `Sat Sri Akal ${member.member_name}, your gym subscription expires in ${Math.max(
-          0,
-          getDaysBetween(new Date().toISOString().slice(0, 10), member.expiry_date)
-        )} days. Please renew to continue.`;
-    return `https://wa.me/91${phone}?text=${encodeURIComponent(dueMessage)}`;
+  const handleClearDue = async (member: Member) => {
+    const istToday = getISTDate();
+    const amountToClear = member.pending_due;
+
+    if (amountToClear <= 0) return;
+
+    const { error: updateError } = await supabase
+      .from("members")
+      .update({ pending_due: 0 })
+      .eq("id", member.id);
+
+    if (updateError) {
+      setStatusMessage(updateError.message);
+      return;
+    }
+
+    await supabase.from("payments").insert([
+      {
+        gym_id: gym!.id,
+        member_id: member.id,
+        amount_paid: amountToClear,
+        payment_date: istToday,
+      },
+    ]);
+
+    await loadMembers(gym!.id);
+    setStatusMessage(`Cleared due for ${member.member_name}.`);
   };
 
-    const activeMembers = members.filter((m) => {
-      return new Date(m.expiry_date) >= new Date(new Date().toISOString().slice(0, 10));
-    });
-    const expiredMembers = members.filter((m) => {
-      return new Date(m.expiry_date) < new Date(new Date().toISOString().slice(0, 10));
-    });
+  const getWhatsappLink = (member: Member) => {
+    const phone = member.phone_number.replace(/\\D/g, "");
+    const diff = getDaysBetween(getISTDate(), member.expiry_date);
 
-    const trialDays = gym
-      ? Math.floor((Date.now() - new Date(gym.trial_start_date).getTime()) / (1000 * 60 * 60 * 24))
-      : 0;
+    let message = "";
+    if (member.pending_due > 0) {
+      message = `Sat Sri Akal ${member.member_name}, your pending due is ₹${member.pending_due}. Please clear it today.`;
+    } else if (diff < 0) {
+      message = `Sat Sri Akal ${member.member_name}, your gym subscription expired ${Math.abs(diff)} days ago. Please renew to continue your training.`;
+    } else {
+      message = `Sat Sri Akal ${member.member_name}, your gym subscription expires in ${diff} days. Please renew to continue.`;
+    }
+    
+    return `https://wa.me/91${phone}?text=${encodeURIComponent(message)}`;
+  };
 
-
+  const trialDays = gym
+    ? Math.floor((Date.now() - new Date(gym.trial_start_date).getTime()) / (1000 * 60 * 60 * 24))
+    : 0;
 
   const trialExpired = gym ? trialDays >= 15 : false;
   const daysLeft = gym ? Math.max(0, 14 - trialDays) : 14;
@@ -390,11 +487,160 @@ export default function Home() {
 
       {gym && !trialExpired && (
         <>
+          <div className="cash-header">
+            <h2>Current Month Collections: ₹{totalCollections}</h2>
+          </div>
+
           <section className="card">
             <h2>{gym.gym_name} Dashboard</h2>
             <p>Trial day {trialDays + 1} / 14</p>
-            <p>Total members: {members.length}</p>
-            <p>Next expiration: {members.filter((m) => getDaysBetween(new Date().toISOString().slice(0, 10), m.expiry_date) <= 5).length}</p>
+            
+            <div className="tab-group">
+              <button 
+                className={`tab-btn ${viewMode === "home" ? "active" : ""}`} 
+                onClick={() => setViewMode("home")}
+              >
+                Home
+              </button>
+              <button 
+                className={`tab-btn ${viewMode === "expiring" ? "active" : ""}`} 
+                onClick={() => setViewMode("expiring")}
+              >
+                Expiring Soon
+              </button>
+              <button 
+                className={`tab-btn ${viewMode === "dues" ? "active" : ""}`} 
+                onClick={() => setViewMode("dues")}
+              >
+                Pending Dues
+              </button>
+              <button 
+                className={`tab-btn ${viewMode === "all" ? "active" : ""}`} 
+                onClick={() => setViewMode("all")}
+              >
+                All Members
+              </button>
+            </div>
+
+
+            <input 
+              type="text" 
+              placeholder="Search members..." 
+              value={searchQuery}
+              onChange={(e) => setSearchQuery(e.target.value)}
+              style={{ marginBottom: "20px" }}
+            />
+
+            <div className="member-list">
+              {viewMode === "home" && (
+                <div className="home-stats-grid" style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '12px', marginBottom: '20px' }}>
+                  <div className="card" style={{ margin: 0, textAlign: 'center', padding: '15px' }}>
+                    <p className="small-text">Total Members</p>
+                    <h2 style={{ margin: 0 }}>{members.length}</h2>
+                  </div>
+                  <div className="card" style={{ margin: 0, textAlign: 'center', padding: '15px' }}>
+                    <p className="small-text">Active Now</p>
+                    <h2 style={{ margin: 0, color: 'green' }}>
+                      {members.filter(m => new Date(m.expiry_date) >= new Date(getISTDate())).length}
+                    </h2>
+                  </div>
+                  <div className="card" style={{ margin: 0, textAlign: 'center', padding: '15px' }}>
+                    <p className="small-text">Expired</p>
+                    <h2 style={{ margin: 0, color: 'red' }}>
+                      {members.filter(m => new Date(m.expiry_date) < new Date(getISTDate())).length}
+                    </h2>
+                  </div>
+                  <div className="card" style={{ margin: 0, textAlign: 'center', padding: '15px' }}>
+                    <p className="small-text">Pending Dues</p>
+                    <h2 style={{ margin: 0, color: 'orange' }}>
+                      {members.filter(m => m.pending_due > 0).length}
+                    </h2>
+                  </div>
+                </div>
+              )}
+
+              {viewMode === "all" && (
+                <div style={{ overflowX: 'auto' }}>
+                  <table style={{ fontSize: '0.85rem' }}>
+                    <thead>
+                      <tr>
+                        <th>Name</th>
+                        <th>Expiry</th>
+                        <th>Due</th>
+                        <th>Action</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {members
+                        .filter(m => m.member_name.toLowerCase().includes(searchQuery.toLowerCase()))
+                        .map((member) => (
+                          <tr key={member.id}>
+                            <td>{member.member_name}</td>
+                            <td>{formatDate(member.expiry_date)}</td>
+                            <td>₹{member.pending_due}</td>
+                            <td>
+                              <button 
+                                onClick={() => handleRenew(member)} 
+                                style={{ padding: '4px 8px', fontSize: '0.7rem' }}
+                              >
+                                Renew
+                              </button>
+                            </td>
+                          </tr>
+                        ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+
+              {viewMode === "expiring" || viewMode === "dues" ? (
+                members
+                  .filter(m => {
+                    const days = getDaysBetween(getISTDate(), m.expiry_date);
+                    if (viewMode === "expiring") return days <= 5 && m.member_name.toLowerCase().includes(searchQuery.toLowerCase());
+                    if (viewMode === "dues") return m.pending_due > 0 && m.member_name.toLowerCase().includes(searchQuery.toLowerCase());
+                    return false;
+                  })
+                  .map((member) => {
+                    const days = getDaysBetween(getISTDate(), member.expiry_date);
+                    return (
+                      <div key={member.id} className="member-card">
+                        <div className="member-card-top">
+                          <div className="member-info">
+                            <h4>{member.member_name}</h4>
+                            <span className="category-tag">{member.category}</span>
+                          </div>
+                          <div className="action-zone">
+                            <a href={getWhatsappLink(member)} target="_blank" rel="noreferrer" className="wa-btn">
+                              WhatsApp
+                            </a>
+                            {viewMode === "expiring" ? (
+                              <button className="renew-btn" onClick={() => handleRenew(member)}>Renew</button>
+                            ) : (
+                              <button className="renew-btn" onClick={() => handleClearDue(member)}>Clear Due</button>
+                            )}
+                          </div>
+                        </div>
+                        <div className="member-card-bottom">
+                          <span className="problem-text">
+                            {viewMode === "expiring" 
+                              ? (days < 0 ? `Expired ${Math.abs(days)} days ago` : `Expires in ${days} days`) 
+                              : `Due: ₹${member.pending_due}`}
+                          </span>
+                        </div>
+                      </div>
+                    );
+                  })
+              ) : null}
+              
+              { (viewMode === "expiring" || viewMode === "dues") && members.filter(m => {
+                  const days = getDaysBetween(getISTDate(), m.expiry_date);
+                  if (viewMode === "expiring") return days <= 5 && m.member_name.toLowerCase().includes(searchQuery.toLowerCase());
+                  if (viewMode === "dues") return m.pending_due > 0 && m.member_name.toLowerCase().includes(searchQuery.toLowerCase());
+                  return false;
+                }).length === 0 && <p className="small-text" style={{textAlign: 'center'}}>No priority members found.</p>}
+            </div>
+
           </section>
 
           <section className="card">
@@ -435,27 +681,34 @@ export default function Home() {
                 onChange={(event) => setNewMember({ ...newMember, amount_paid: event.target.value })}
               />
             </div>
-            <div className="button-row">
+            
+            {Number(newMember.monthly_fee) > Number(newMember.amount_paid) && (
+              <div className="udhaar-badge" style={{ textAlign: 'center', marginBottom: '15px' }}>
+                Pending Udhaar: ₹{Number(newMember.monthly_fee) - Number(newMember.amount_paid)}
+              </div>
+            )}
+
+            <div className="date-hack">
               <button
                 type="button"
                 className={startDateMode === "today" ? "active" : ""}
                 onClick={() => setStartDateMode("today")}
               >
-                Starts Today
+                Today
               </button>
               <button
                 type="button"
                 className={startDateMode === "tomorrow" ? "active" : ""}
                 onClick={() => setStartDateMode("tomorrow")}
               >
-                Starts Tomorrow
+                Tomorrow
               </button>
               <button
                 type="button"
                 className={startDateMode === "custom" ? "active" : ""}
                 onClick={() => setStartDateMode("custom")}
               >
-                Custom Date
+                Custom
               </button>
             </div>
             {startDateMode === "custom" && (
@@ -465,73 +718,8 @@ export default function Home() {
                 onChange={(event) => setCustomStartDate(event.target.value)}
               />
             )}
-            <button onClick={handleAddMember}>Save member</button>
+            <button onClick={handleAddMember} style={{ width: '100%' }}>Save Member</button>
           </section>
-
-           <section className="card">
-             <h2>Membership Status</h2>
-             <div style={{ marginBottom: "30px" }}>
-               <h3 style={{ color: "green" }}>✅ Currently Running (Active)</h3>
-               {activeMembers.length === 0 ? (
-                 <p className="small-text">No active members.</p>
-               ) : (
-                 <table>
-                   <thead>
-                     <tr>
-                       <th>Name</th>
-                       <th>Phone</th>
-                       <th>Expiry</th>
-                       <th>Action</th>
-                     </tr>
-                   </thead>
-                   <tbody>
-                     {activeMembers.map((member) => (
-                       <tr key={member.id}>
-                         <td>{member.member_name}</td>
-                         <td>{member.phone_number}</td>
-                         <td>{formatDate(member.expiry_date)}</td>
-                         <td className="member-actions">
-                           <button onClick={() => handleRenew(member)}>Renew</button>
-                         </td>
-                       </tr>
-                     ))}
-                   </tbody>
-                 </table>
-               )}
-             </div>
-
-             <div>
-               <h3 style={{ color: "red" }}>❌ Out of Subscription (Expired)</h3>
-               {expiredMembers.length === 0 ? (
-                 <p className="small-text">No expired members.</p>
-               ) : (
-                 <table>
-                   <thead>
-                     <tr>
-                       <th>Name</th>
-                       <th>Phone</th>
-                       <th>Expiry</th>
-                       <th>Action</th>
-                     </tr>
-                   </thead>
-                   <tbody>
-                     {expiredMembers.map((member) => (
-                       <tr key={member.id}>
-                         <td>{member.member_name}</td>
-                         <td>{member.phone_number}</td>
-                         <td>{formatDate(member.expiry_date)}</td>
-                         <td className="member-actions">
-                           <button onClick={() => handleRenew(member)}>Renew</button>
-                         </td>
-                       </tr>
-                     ))}
-                   </tbody>
-                 </table>
-               )}
-             </div>
-           </section>
-
-
         </>
       )}
     </main>
