@@ -15,11 +15,12 @@ CREATE TABLE members (
     member_name TEXT NOT NULL,
     phone_number TEXT NOT NULL,
     member_email TEXT,
-    category TEXT CHECK (category IN ('Weight Training', 'Cardio', 'Zumba')),
+    category TEXT CHECK (category IN ('Weight Training', 'Cardio', 'Yoga', 'CrossFit', 'Boxing', 'Zumba')),
     start_date DATE NOT NULL,
     expiry_date DATE NOT NULL,
     monthly_fee NUMERIC NOT NULL,
-    pending_due NUMERIC DEFAULT 0
+    pending_due NUMERIC DEFAULT 0,
+    advance_balance NUMERIC DEFAULT 0
 );
 
 CREATE TABLE payments (

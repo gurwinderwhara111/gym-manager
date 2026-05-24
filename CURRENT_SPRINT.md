@@ -1,12 +1,11 @@
-# Current Sprint: Initial Setup
+# Current Sprint: Fix Build Error
 ## Objective
-Establish the project foundation and implement the autonomous engineering system.
+Resolve the syntax error in `app/Home.tsx` and ensure the project builds successfully.
 
 ## Boundaries
-- No complex business logic yet.
-- No production deployment.
+- Focus on `app/Home.tsx` and structural correctness.
 
 ## Success Criteria
-- [x] Persistent Engineering Context files implemented.
-- [ ] Initial project analysis completed.
-- [ ] Basic Gym Manager features identified.
+- [ ] `npm run build` (or equivalent) passes.
+- [ ] Application renders without JSX errors.
+- [ ] Redundant auth blocks removed.

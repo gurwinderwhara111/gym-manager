@@ -1,21 +1,21 @@
 # Active Context
 
 ## Current Task
-Implementing High-Performance Autonomous Engineering System and Initial Project Analysis.
+Fix syntax error in `app/Home.tsx` and restore build functionality.
 
 ## Current Blockers
-- None.
+- `Unexpected token div. Expected jsx identifier` in `app/Home.tsx`.
 
 ## Architecture Constraints
-- Next.js 14.2.5
+- Next.js 14.2.5 (App Router)
 - Supabase for backend/DB
 - TypeScript
-- Tailwind CSS (likely, though not explicitly in package.json, it's standard for Next.js)
+- Tailwind CSS
 
 ## Active Hypothesis
-- The project is in its very early stages, as only `page.tsx` and `layout.tsx` exist.
+- The syntax error is caused by mismatched closing tags (e.g., using `</div>` to close a `<section>`) and redundant conditional blocks in `app/Home.tsx`.
 
 ## Current Priorities
-1. Complete the system implementation.
-2. Analyze `supabase/schema.sql` to understand the data model.
-3. Plan the core features of the Gym Manager.
+1. Fix syntax error in `app/Home.tsx`.
+2. Remove redundant authentication checks.
+3. Verify the application builds and runs.

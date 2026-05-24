@@ -7,9 +7,8 @@ let lastUrl: string | null = null;
 function getCurrentSupabaseUrl(): string {
   if (typeof window !== "undefined") {
     const isCodespaces = window.location.hostname.includes("app.github.dev");
-    if (isCodespaces) {
-      // Use the Next.js rewrite proxy to avoid "Private Port" 401 errors in Codespaces
-      return `${window.location.origin}/supabase-api`;
+    if (isCodespaces && process.env.NEXT_PUBLIC_SUPABASE_URL_CODESPACES) {
+      return process.env.NEXT_PUBLIC_SUPABASE_URL_CODESPACES;
     }
   }
   return process.env.NEXT_PUBLIC_SUPABASE_URL || "";
@@ -21,7 +20,12 @@ function getOrCreateSupabase() {
   const supabaseAnonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
 
   if (!currentUrl || !supabaseAnonKey) {
-    throw new Error("Missing Supabase environment variables.");
+    console.error("Missing Supabase environment variables. Please check your .env file.");
+    // Return a dummy client to prevent the app from crashing immediately
+    return {
+      auth: { getSession: async () => ({ data: { session: null }, error: { message: "Missing ENV" } }), onAuthStateChange: () => ({ data: { subscription: { unsubscribe: () => {} } } }) },
+      from: () => ({ select: () => ({ eq: () => ({ maybeSingle: async () => ({ data: null, error: { message: "Missing ENV" } }) }) }) }),
+    };
   }
 
   // Recreate client if URL has changed (e.g., Codespaces detection)

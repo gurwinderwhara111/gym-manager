@@ -1,0 +1,8 @@
+{
+    "php.suggest.basic": false,
+    "intelephense.completion.triggerParameterHints": true,
+    "intelephense.diagnostics.undefinedSymbols": true,
+    "intelephense.diagnostics.undefinedFunctions": true,
+    "intelephense.diagnostics.undefinedTypes": true,
+    "intelephense.files.maxSize": 5000000
+}

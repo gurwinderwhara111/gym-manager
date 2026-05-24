@@ -1,16 +1,17 @@
-# Context Audit
+# Context Audit - 2026-05-23
 
-## Active Instruction Sources
-- `AGENTS.md`
-- `ACTIVE_CONTEXT.md`
-- `REPORT.md`
-- `CURRENT_SPRINT.md`
-- `guide (2).md` (Reference)
+## Current State
+- The project is a Next.js 14 app using Supabase.
+- The main logic is in `app/Home.tsx` and it's wrapped by `app/page.tsx`.
+- There is a persistent syntax error: `Unexpected token div. Expected jsx identifier`.
 
-## Loaded Operational Constraints
-- Rate limit: 10 requests per minute.
-- Model: gemma-4-31b-it.
-- Operational Mode: build.
+## Findings
+- `app/Home.tsx` has incorrect closing tags for `<section>` elements (using `</div>` instead of `</section>`).
+- There is a redundant `if (!session?.user)` block in `app/Home.tsx` (L565-631).
+- Hot context files (`ACTIVE_CONTEXT.md`, `REPORT.md`, `CURRENT_SPRINT.md`) are out of date.
 
-## Conflicting Instructions
-- None found.
+## Plan
+1. Update hot context files.
+2. Fix syntax errors in `app/Home.tsx` (correct closing tags).
+3. Remove redundant code in `app/Home.tsx`.
+4. Verify build with `npm run build` (or equivalent).
