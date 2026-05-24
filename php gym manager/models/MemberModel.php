@@ -68,12 +68,23 @@ class MemberModel {
     }
 
     public function edit(int $id, int $gymId, array $data): bool {
+        $allowedFields = [
+            'member_name', 'phone_number', 'member_email', 
+            'service_id', 'service_name', 'monthly_fee', 
+            'pending_due', 'notes'
+        ];
+        
         $fields = [];
         $params = [];
         foreach ($data as $key => $val) {
-            $fields[] = "$key = ?";
-            $params[] = $val;
+            if (in_array($key, $allowedFields)) {
+                $fields[] = "$key = ?";
+                $params[] = $val;
+            }
         }
+        
+        if (empty($fields)) return false;
+
         $params[] = $id;
         $params[] = $gymId;
 
