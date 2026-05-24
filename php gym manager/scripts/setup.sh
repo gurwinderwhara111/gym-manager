@@ -1,8 +1,11 @@
 #!/bin/bash
 echo "Setting up Gym Manager..."
 
+# Ensure we are in the project root
+cd "$(dirname "$0")/.."
+
 cp .env.example .env
-echo "✅ .env created — edit DB_DRIVER and credentials"
+echo "✅ .env created"
 
 mkdir -p db assets/css assets/js
 echo "✅ Directories created"
