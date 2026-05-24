@@ -9,11 +9,18 @@ function getDB(): PDO {
     $driver = $_ENV['DB_DRIVER'] ?? 'sqlite';
 
     if ($driver === 'sqlite') {
-        $path = str_replace('__DIR__', __DIR__ . '/..', $_ENV['DB_SQLITE_PATH']);
+        $path = $_ENV['DB_SQLITE_PATH'] ?? '__DIR__/db/gym.db';
+        
+        // If path contains __DIR__, resolve it relative to this config file
+        if (str_contains($path, '__DIR__')) {
+            $path = str_replace('__DIR__', __DIR__ . '/..', $path);
+        }
+        
         $pdo = new PDO('sqlite:' . $path);
         $pdo->exec('PRAGMA foreign_keys = ON;');
         $pdo->exec('PRAGMA journal_mode = WAL;');
     } elseif ($driver === 'mysql') {
+
         $dsn = sprintf(
             'mysql:host=%s;port=%s;dbname=%s;charset=utf8mb4',
             $_ENV['DB_HOST'],

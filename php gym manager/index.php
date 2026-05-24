@@ -21,12 +21,12 @@ Auth::start();
 $uri    = parse_url($_SERVER['REQUEST_URI'], PHP_URL_PATH);
 $method = $_SERVER['REQUEST_METHOD'];
 
-// Global Trial Guard for owners
-if (Auth::user() && Auth::user()['role'] === 'owner') {
-    Auth::trialGuard();
-}
+// FIX: Remove /index.php from the URI so the router still works with the short command
+$uri = str_replace('/index.php', '', $uri);
+if ($uri === '') $uri = '/';
 
 match(true) {
+
     // Auth routes
     $uri === '/login'  && $method === 'GET'  => (new AuthController)->showLogin(),
     $uri === '/login'  && $method === 'POST' => (new AuthController)->login(),

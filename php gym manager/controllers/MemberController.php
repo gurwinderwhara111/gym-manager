@@ -32,7 +32,11 @@ class MemberController {
         CSRF::assertValid();
 
         $data = Request::json() ?? $_POST;
+        if (!$data || !is_array($data)) {
+            Response::error('Invalid request data');
+        }
         $gymId = Auth::gymId();
+
 
         $name = Request::sanitize($data['member_name'] ?? '');
         $phone = preg_replace('/\D/', '', $data['phone_number'] ?? '');
@@ -107,13 +111,27 @@ class MemberController {
         $gymId = Auth::gymId();
         $data = Request::json() ?? $_POST;
         
+        if (!$data || !is_array($data)) {
+            Response::error('No data provided for update');
+        }
+
         unset($data['id']);
         $sanitizedData = [];
         foreach ($data as $k => $v) {
             $sanitizedData[$k] = Request::sanitize($v);
         }
 
+        if (empty($sanitizedData)) {
+            Response::error('No fields to update');
+        }
+
         if ($this->memberModel->edit($id, $gymId, $sanitizedData)) {
+            // Log the edit in history
+            $db = Database::getInstance();
+            $db->execute(
+                "INSERT INTO member_history (gym_id, member_id, event_type, event_date, details) VALUES (?, ?, 'edited', date('now'), ?)",
+                [$gymId, $id, json_encode($sanitizedData)]
+            );
             Response::success(['message' => 'Member updated']);
         } else {
             Response::error('Update failed');
@@ -127,21 +145,44 @@ class MemberController {
         $id = (int)Request::post('id');
         $gymId = Auth::gymId();
         $months = (int)(Request::post('months') ?? 1);
+        $amountPaid = (float)(Request::post('amount_paid') ?? 0);
 
-        if ($this->memberModel->renew($id, $gymId, $months)) {
-            $member = $this->memberModel->getById($id, $gymId);
-            $db = Database::getInstance();
+        $db = Database::getInstance();
+        $member = $db->fetch("SELECT * FROM members WHERE id = ? AND gym_id = ?", [$id, $gymId]);
+        if (!$member) Response::error('Member not found');
+
+        $feeForPeriod = $member['monthly_fee'] * $months;
+        $newDue = max(0, ($member['pending_due'] ?? 0) + $feeForPeriod - $amountPaid);
+
+        try {
+            $db->beginTransaction();
+            
+            if (!$this->memberModel->renew($id, $gymId, $months)) {
+                throw new Exception('Member renewal update failed');
+            }
+
             $db->execute(
-                "INSERT INTO payments (gym_id, member_id, amount_paid, payment_date, note) VALUES (?, ?, ?, date('now'), 'renewal')",
-                [$gymId, $id, $member['monthly_fee']]
+                "UPDATE members SET pending_due = ? WHERE id = ? AND gym_id = ?",
+                [$newDue, $id, $gymId]
             );
+
+            if ($amountPaid > 0) {
+                $db->execute(
+                    "INSERT INTO payments (gym_id, member_id, amount_paid, payment_date, note) VALUES (?, ?, ?, date('now'), 'renewal')",
+                    [$gymId, $id, $amountPaid]
+                );
+            }
+
             $db->execute(
                 "INSERT INTO member_history (gym_id, member_id, event_type, event_date) VALUES (?, ?, 'renewed', date('now'))",
                 [$gymId, $id]
             );
-            Response::success(['message' => 'Member renewed']);
-        } else {
-            Response::error('Renewal failed');
+
+            $db->commit();
+            Response::success(['message' => 'Member renewed', 'new_due' => $newDue]);
+        } catch (Exception $e) {
+            $db->rollBack();
+            Response::error('Renewal failed: ' . $e->getMessage());
         }
     }
 
@@ -209,20 +250,36 @@ class MemberController {
         $rejoinData = [
             'start_date' => $startDate,
             'expiry_date' => $expiryDate,
-            'service_id' => (int)$data['service_id'],
-            'service_name' => Request::sanitize($data['service_name']),
-            'monthly_fee' => (float)$data['monthly_fee'],
+            'service_id' => (int)($data['service_id'] ?? 0),
+            'service_name' => Request::sanitize($data['service_name'] ?? ''),
+            'monthly_fee' => (float)($data['monthly_fee'] ?? 0),
         ];
 
-        if ($this->memberModel->rejoin($id, $gymId, $rejoinData)) {
-            $db = Database::getInstance();
+        $db = Database::getInstance();
+        try {
+            $db->beginTransaction();
+
+            // Explicitly reset pending_due to 0 and update member
+            if (!$this->memberModel->rejoin($id, $gymId, $rejoinData)) {
+                throw new Exception('Rejoin update failed');
+            }
+            
+            // MemberModel::rejoin already sets pending_due=0 but let's be extra sure and log it
+            $db->execute(
+                "UPDATE members SET pending_due = 0 WHERE id = ? AND gym_id = ?",
+                [$id, $gymId]
+            );
+
             $db->execute(
                 "INSERT INTO member_history (gym_id, member_id, event_type, event_date) VALUES (?, ?, 'rejoined', date('now'))",
                 [$gymId, $id]
             );
+
+            $db->commit();
             Response::success(['message' => 'Member rejoined']);
-        } else {
-            Response::error('Rejoin failed');
+        } catch (Exception $e) {
+            $db->rollBack();
+            Response::error('Rejoin failed: ' . $e->getMessage());
         }
     }
 

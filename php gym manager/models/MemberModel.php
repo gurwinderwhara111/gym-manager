@@ -7,11 +7,9 @@ class MemberModel {
     }
 
     public function getAllByGym(int $gymId, string $status = 'all', string $search = ''): array {
-        // Run auto-dead logic first
-        $this->runAutoDeadUpdate($gymId);
-
         $sql = "SELECT * FROM members WHERE gym_id = ?";
         $params = [$gymId];
+
 
         if ($status !== 'all') {
             if ($status === 'running') {

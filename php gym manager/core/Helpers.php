@@ -15,7 +15,20 @@ function isExpired(string $expiryDate): bool {
 
 function buildWhatsappLink(array $member, array $settings, string $gymName): string {
     $phone = preg_replace('/\D/', '', $member['phone_number']);
-    if (strlen($phone) === 10) $phone = '91' . $phone;
+    
+    // Handle Indian phone number edge cases:
+    // 1. Remove leading 0 if present
+    if (str_starts_with($phone, '0')) {
+        $phone = substr($phone, 1);
+    }
+    // 2. Remove leading 91 if present to normalize
+    if (str_starts_with($phone, '91') && strlen($phone) === 12) {
+        $phone = substr($phone, 2);
+    }
+    // 3. Force prepend 91 for wa.me
+    if (strlen($phone) === 10) {
+        $phone = '91' . $phone;
+    }
 
     $today    = date('Y-m-d');
     $expiry   = $member['expiry_date'];

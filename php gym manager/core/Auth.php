@@ -6,12 +6,13 @@ class Auth {
         }
     }
 
-    public static function login(int $userId, string $role, ?int $gymId, string $gymName = ''): void {
+    public static function login(int $userId, string $role, ?int $gymId, string $gymName = '', ?string $trialStartDate = null): void {
         session_regenerate_id(true); // Prevent session fixation
         $_SESSION['user_id']  = $userId;
         $_SESSION['role']     = $role;
         $_SESSION['gym_id']   = $gymId;
         $_SESSION['gym_name'] = $gymName;
+        $_SESSION['trial_start_date'] = $trialStartDate;
     }
 
     public static function logout(): void {
@@ -30,11 +31,25 @@ class Auth {
 
     public static function guard(?string $role = null): void {
         self::start();
+        
+        $isApi = str_contains($_SERVER['REQUEST_URI'], '/api/') || 
+                 (isset($_SERVER['HTTP_X_REQUESTED_WITH']) && $_SERVER['HTTP_X_REQUESTED_WITH'] === 'XMLHttpRequest');
+
         if (!isset($_SESSION['user_id'])) {
+            if ($isApi) {
+                http_response_code(401);
+                echo json_encode(['success' => false, 'error' => 'Session expired. Please login again.']);
+                exit;
+            }
             header('Location: /login');
             if (!defined('TEST_MODE')) exit;
         }
         if ($role && $_SESSION['role'] !== $role) {
+            if ($isApi) {
+                http_response_code(403);
+                echo json_encode(['success' => false, 'error' => 'Unauthorized access.']);
+                exit;
+            }
             header('Location: /dashboard');
             if (!defined('TEST_MODE')) exit;
         }
@@ -48,11 +63,20 @@ class Auth {
         $userId = self::user()['id'] ?? 0;
         if (!$userId) return;
 
-        $db = Database::getInstance();
-        $gym = $db->fetch("SELECT trial_start_date FROM gyms WHERE user_id = ?", [$userId]);
+        $trialStartDate = $_SESSION['trial_start_date'] ?? null;
         
-        if ($gym) {
-            $start = strtotime($gym['trial_start_date']);
+        if (!$trialStartDate) {
+            // Fallback: load it from DB and update session
+            $db = Database::getInstance();
+            $gym = $db->fetch("SELECT trial_start_date FROM gyms WHERE user_id = ?", [$userId]);
+            if ($gym) {
+                $trialStartDate = $gym['trial_start_date'];
+                $_SESSION['trial_start_date'] = $trialStartDate;
+            }
+        }
+        
+        if ($trialStartDate) {
+            $start = strtotime($trialStartDate);
             $today = strtotime(date('Y-m-d'));
             $daysUsed = (int)(($today - $start) / 86400);
             

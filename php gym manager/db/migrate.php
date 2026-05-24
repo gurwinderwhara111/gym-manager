@@ -14,7 +14,14 @@ $db = getDB();
 $statements = array_filter(array_map('trim', explode(';', $schema)));
 foreach ($statements as $stmt) {
     if (!empty($stmt)) {
-        $db->exec($stmt);
+        try {
+            $db->exec($stmt);
+        } catch (Exception $e) {
+            echo "\n❌ MIGRATION FAILED\n";
+            echo "Statement: $stmt\n";
+            echo "Error: " . $e->getMessage() . "\n";
+            exit(1);
+        }
     }
 }
 

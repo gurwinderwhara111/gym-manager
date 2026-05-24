@@ -14,7 +14,11 @@ class DashboardController {
         
         $gymId = (int)$gym['id'];
         
+        // Run auto-dead update only on dashboard load
+        (new MemberModel())->runAutoDeadUpdate($gymId);
+        
         // Calculate trial days for the view
+
         $trialStart = $gym['trial_start_date'];
         $daysUsed = (int)( (strtotime(date('Y-m-d')) - strtotime($trialStart)) / 86400 );
         

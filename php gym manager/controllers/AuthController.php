@@ -22,13 +22,15 @@ class AuthController {
 
         // Get gym if it exists
         $gym = $db->fetch("SELECT * FROM gyms WHERE user_id = ?", [$user['id']]);
-
+        
         Auth::login(
             (int)$user['id'],
             $user['role'],
             $gym ? (int)$gym['id'] : null,
-            $gym ? $gym['gym_name'] : ''
+            $gym ? $gym['gym_name'] : '',
+            $gym ? $gym['trial_start_date'] : null
         );
+
 
         Response::redirect('/dashboard');
     }

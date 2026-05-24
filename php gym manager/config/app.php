@@ -1,7 +1,9 @@
 <?php
 // AGENT: Load .env FIRST before anything else. Use this file as the bootstrap.
+date_default_timezone_set('Asia/Kolkata');
 
 $envFile = __DIR__ . '/../.env';
+
 if (file_exists($envFile)) {
     $lines = file($envFile, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES);
     foreach ($lines as $line) {
