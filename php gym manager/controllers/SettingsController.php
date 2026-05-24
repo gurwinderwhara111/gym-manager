@@ -21,7 +21,15 @@ class SettingsController {
             $sanitized[$k] = Request::sanitize($v);
         }
 
-        if ($this->settingsModel->save(Auth::gymId(), $sanitized)) {
+        // Split gym details and settings
+        $gymFields = array_intersect_key($sanitized, array_flip(['gym_name', 'owner_name', 'owner_phone', 'gym_address', 'upi_id']));
+        $settingsFields = array_intersect_key($sanitized, array_flip(['template_overdue', 'template_expiring_soon', 'template_expires_today', 'template_expired', 'template_rejoin', 'dead_threshold_days']));
+
+        if (!empty($gymFields)) {
+            (new GymModel())->update(Auth::gymId(), $gymFields);
+        }
+
+        if ($this->settingsModel->save(Auth::gymId(), $settingsFields)) {
             Response::success(['message' => 'Settings saved']);
         } else {
             Response::error('Save failed');

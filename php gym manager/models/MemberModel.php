@@ -12,9 +12,10 @@ class MemberModel {
 
 
         if ($status !== 'all') {
-            if ($status === 'running') {
-                $sql .= " AND status = 'active' AND expiry_date >= date('now')";
-            } elseif ($status === 'overdue') {
+        if ($status === 'running') {
+            $sql .= " AND status IN ('active', 'rejoined') AND expiry_date >= date('now')";
+        } elseif ($status === 'overdue') {
+
                 $sql .= " AND (status IN ('active','overdue') AND (expiry_date < date('now') OR pending_due > 0))";
             } elseif ($status === 'dead') {
                 $sql .= " AND status = 'dead'";

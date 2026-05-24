@@ -22,6 +22,7 @@ CREATE TABLE IF NOT EXISTS gyms (
     owner_phone         TEXT,
     gym_address         TEXT,
     upi_id              TEXT,
+    is_unlocked         INTEGER NOT NULL DEFAULT 0,
     trial_start_date    TEXT NOT NULL DEFAULT (date('now')),
     created_at          TEXT NOT NULL DEFAULT (datetime('now')),
     FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
@@ -36,6 +37,7 @@ CREATE TABLE IF NOT EXISTS gym_services (
     gym_id      INTEGER NOT NULL,
     name        TEXT NOT NULL,
     price       REAL NOT NULL DEFAULT 0,
+    duration_days INTEGER NOT NULL DEFAULT 30,
     is_active   INTEGER NOT NULL DEFAULT 1,   -- 1=active, 0=deleted
     created_at  TEXT NOT NULL DEFAULT (datetime('now')),
     FOREIGN KEY (gym_id) REFERENCES gyms(id) ON DELETE CASCADE
@@ -77,7 +79,7 @@ CREATE TABLE IF NOT EXISTS members (
     expiry_date     TEXT NOT NULL,
     joined_date     TEXT NOT NULL,  -- FIRST ever join, never changes
     last_renewed_at TEXT,
-    status          TEXT NOT NULL DEFAULT 'active', -- active | overdue | dead | rejoined
+    status          TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active','overdue','dead','rejoined')),
     notes           TEXT,
     created_at      TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at      TEXT NOT NULL DEFAULT (datetime('now')),

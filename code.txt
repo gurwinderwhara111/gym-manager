@@ -1,0 +1,3603 @@
+--------------------------------------------------------------------------------
+FILE: /workspaces/gym-manager/php gym manager/db/schema.sql
+--------------------------------------------------------------------------------
+-- ============================================================
+-- TABLE 1: users
+-- Stores gym owners AND gym members who want portal access
+-- ============================================================
+CREATE TABLE IF NOT EXISTS users (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    email       TEXT NOT NULL UNIQUE,
+    password    TEXT NOT NULL,
+    role        TEXT NOT NULL DEFAULT 'owner',  -- 'owner' | 'member'
+    created_at  TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+-- ============================================================
+-- TABLE 2: gyms
+-- One row per gym. Linked to owner user.
+-- ============================================================
+CREATE TABLE IF NOT EXISTS gyms (
+    id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id             INTEGER NOT NULL UNIQUE,
+    gym_name            TEXT NOT NULL,
+    owner_name          TEXT,
+    owner_phone         TEXT,
+    gym_address         TEXT,
+    upi_id              TEXT,
+    trial_start_date    TEXT NOT NULL DEFAULT (date('now')),
+    created_at          TEXT NOT NULL DEFAULT (datetime('now')),
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+);
+
+-- ============================================================
+-- TABLE 3: gym_services
+-- Owner-defined services (Weight Training, Zumba, etc.) with prices
+-- ============================================================
+CREATE TABLE IF NOT EXISTS gym_services (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    gym_id      INTEGER NOT NULL,
+    name        TEXT NOT NULL,
+    price       REAL NOT NULL DEFAULT 0,
+    is_active   INTEGER NOT NULL DEFAULT 1,   -- 1=active, 0=deleted
+    created_at  TEXT NOT NULL DEFAULT (datetime('now')),
+    FOREIGN KEY (gym_id) REFERENCES gyms(id) ON DELETE CASCADE
+);
+
+-- ============================================================
+-- TABLE 4: gym_settings
+-- WhatsApp message templates + dead threshold config
+-- ============================================================
+CREATE TABLE IF NOT EXISTS gym_settings (
+    id                      INTEGER PRIMARY KEY AUTOINCREMENT,
+    gym_id                  INTEGER NOT NULL UNIQUE,
+    template_overdue        TEXT NOT NULL DEFAULT 'Sat Sri Akal {name} paaji, aapka pending due Rs.{due} hai. Please aaj counter pe clear karo.',
+    template_expiring_soon  TEXT NOT NULL DEFAULT 'Sat Sri Akal {name} paaji, aapki gym membership {days} din mein expire hogi. Please renew karwa lo.',
+    template_expires_today  TEXT NOT NULL DEFAULT 'Sat Sri Akal {name} paaji, aapki gym membership aaj expire ho rahi hai. Aaj hi renew karwa lo.',
+    template_expired        TEXT NOT NULL DEFAULT 'Sat Sri Akal {name} paaji, aapki gym membership {days} din pehle expire ho gayi. Counter pe aa jao.',
+    template_rejoin         TEXT NOT NULL DEFAULT 'Sat Sri Akal {name} paaji, bahut time ho gaya. Wapas aa jao gym. Special offer hai!',
+    dead_threshold_days     INTEGER NOT NULL DEFAULT 60,
+    updated_at              TEXT NOT NULL DEFAULT (datetime('now')),
+    FOREIGN KEY (gym_id) REFERENCES gyms(id) ON DELETE CASCADE
+);
+
+-- ============================================================
+-- TABLE 5: members
+-- Core member data. status drives all filtering logic.
+-- ============================================================
+CREATE TABLE IF NOT EXISTS members (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    gym_id          INTEGER NOT NULL,
+    user_id         INTEGER,    -- NULL unless member has portal login
+    member_name     TEXT NOT NULL,
+    phone_number    TEXT NOT NULL,
+    member_email    TEXT,
+    service_id      INTEGER,    -- FK to gym_services
+    service_name    TEXT NOT NULL,  -- denormalized for display (service may be deleted)
+    monthly_fee     REAL NOT NULL DEFAULT 0,
+    pending_due     REAL NOT NULL DEFAULT 0,
+    start_date      TEXT NOT NULL,
+    expiry_date     TEXT NOT NULL,
+    joined_date     TEXT NOT NULL,  -- FIRST ever join, never changes
+    last_renewed_at TEXT,
+    status          TEXT NOT NULL DEFAULT 'active', -- active | overdue | dead | rejoined
+    notes           TEXT,
+    created_at      TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at      TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE (gym_id, phone_number),  -- DUPLICATE PREVENTION
+    FOREIGN KEY (gym_id)     REFERENCES gyms(id)         ON DELETE CASCADE,
+    FOREIGN KEY (user_id)    REFERENCES users(id)        ON DELETE SET NULL,
+    FOREIGN KEY (service_id) REFERENCES gym_services(id) ON DELETE SET NULL
+);
+
+-- ============================================================
+-- TABLE 6: payments
+-- Ledger of all cash collected. No payment gateway.
+-- ============================================================
+CREATE TABLE IF NOT EXISTS payments (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    gym_id        INTEGER NOT NULL,
+    member_id     INTEGER NOT NULL,
+    amount_paid   REAL NOT NULL,
+    payment_date  TEXT NOT NULL DEFAULT (date('now')),
+    note          TEXT,   -- e.g. 'first payment', 'partial due', 'renewal'
+    created_at    TEXT NOT NULL DEFAULT (datetime('now')),
+    FOREIGN KEY (gym_id)    REFERENCES gyms(id)     ON DELETE CASCADE,
+    FOREIGN KEY (member_id) REFERENCES members(id)  ON DELETE CASCADE
+);
+
+-- ============================================================
+-- TABLE 7: member_history
+-- Tracks every status change (join, renew, dead, rejoin)
+-- ============================================================
+CREATE TABLE IF NOT EXISTS member_history (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    gym_id      INTEGER NOT NULL,
+    member_id   INTEGER NOT NULL,
+    event_type  TEXT NOT NULL,  -- 'joined' | 'renewed' | 'marked_dead' | 'rejoined'
+    event_date  TEXT NOT NULL DEFAULT (date('now')),
+    details     TEXT,   -- JSON string with extra data (e.g. '{"extended_days": 30}')
+    created_at  TEXT NOT NULL DEFAULT (datetime('now')),
+    FOREIGN KEY (gym_id)    REFERENCES gyms(id)     ON DELETE CASCADE,
+    FOREIGN KEY (member_id) REFERENCES members(id)  ON DELETE CASCADE
+);
+
+-- ============================================================
+-- INDEXES (improve query speed)
+-- ============================================================
+CREATE INDEX IF NOT EXISTS idx_members_gym_id     ON members(gym_id);
+CREATE INDEX IF NOT EXISTS idx_members_status     ON members(gym_id, status);
+CREATE INDEX IF NOT EXISTS idx_members_expiry     ON members(gym_id, expiry_date);
+CREATE INDEX IF NOT EXISTS idx_members_phone      ON members(gym_id, phone_number);
+CREATE INDEX IF NOT EXISTS idx_payments_gym_date  ON payments(gym_id, payment_date);
+CREATE INDEX IF NOT EXISTS idx_history_member     ON member_history(member_id);
+
+
+--------------------------------------------------------------------------------
+FILE: /workspaces/gym-manager/php gym manager/db/seed.php
+--------------------------------------------------------------------------------
+<?php
+require_once __DIR__ . '/../config/app.php';
+require_once __DIR__ . '/../config/db.php';
+require_once __DIR__ . '/../core/Database.php';
+
+$db = Database::getInstance();
+
+// Owner user
+$ownerPass = password_hash('test1234', PASSWORD_BCRYPT);
+$db->execute(
+    "INSERT OR IGNORE INTO users (email, password, role) VALUES (?, ?, 'owner')",
+    ['owner@gymtest.com', $ownerPass]
+);
+$ownerId = $db->fetch("SELECT id FROM users WHERE email = ?", ['owner@gymtest.com'])['id'];
+
+// Gym
+$db->execute(
+    "INSERT OR IGNORE INTO gyms (user_id, gym_name, owner_name, owner_phone, upi_id, trial_start_date)
+     VALUES (?, 'Brar Fitness Club', 'Harpreet Brar', '9876543210', 'brar@upi', date('now'))",
+    [$ownerId]
+);
+$gymId = $db->fetch("SELECT id FROM gyms WHERE user_id = ?", [$ownerId])['id'];
+
+// Gym settings (defaults)
+$db->execute(
+    "INSERT OR IGNORE INTO gym_settings (gym_id) VALUES (?)",
+    [$gymId]
+);
+
+// Default services
+$services = [
+    ['Weight Training', 1500],
+    ['Cardio',           1000],
+    ['Zumba',             800],
+];
+foreach ($services as [$name, $price]) {
+    $db->execute(
+        "INSERT OR IGNORE INTO gym_services (gym_id, name, price) VALUES (?, ?, ?)",
+        [$gymId, $name, $price]
+    );
+}
+$serviceId = $db->fetch("SELECT id FROM gym_services WHERE gym_id = ? AND name = 'Weight Training'", [$gymId])['id'];
+
+// Test member user (for portal)
+$memberPass = password_hash('member123', PASSWORD_BCRYPT);
+$db->execute(
+    "INSERT OR IGNORE INTO users (email, password, role) VALUES (?, ?, 'member')",
+    ['member@gymtest.com', $memberPass]
+);
+$memberId = $db->fetch("SELECT id FROM users WHERE email = ?", ['member@gymtest.com'])['id'];
+
+// Test member
+$today    = date('Y-m-d');
+$expiry   = date('Y-m-d', strtotime('+25 days'));
+$db->execute(
+    "INSERT OR IGNORE INTO members (gym_id, user_id, member_name, phone_number, member_email,
+     service_id, service_name, monthly_fee, pending_due, start_date, expiry_date, joined_date, status)
+     VALUES (?, ?, 'Gurpreet Singh', '9988776655', 'member@gymtest.com', ?, 'Weight Training', 1500, 200, ?, ?, ?, 'active')",
+    [$gymId, $memberId, $serviceId, $today, $expiry, $today]
+);
+
+// A few more dummy members
+$dummies = [
+    ['Sukhdev Kumar',  '9876501234', 'Weight Training', 1500, 0,   '+5 days',  'active'],
+    ['Manpreet Kaur',  '9876502345', 'Zumba',            800, 800, '-2 days',  'overdue'],
+    ['Rajinder Singh', '9876503456', 'Cardio',           1000, 500, '-70 days', 'dead'],
+    ['Amrit Gill',     '9876504567', 'Weight Training', 1500, 0,   '+28 days', 'active'],
+];
+foreach ($dummies as [$name, $phone, $svcName, $fee, $due, $offset, $status]) {
+    $svc = $db->fetch("SELECT id FROM gym_services WHERE gym_id = ? AND name = ?", [$gymId, $svcName]);
+    $exp = date('Y-m-d', strtotime($offset));
+    $db->execute(
+        "INSERT OR IGNORE INTO members (gym_id, member_name, phone_number, service_name, monthly_fee,
+         pending_due, start_date, expiry_date, joined_date, status)
+         VALUES (?, ?, ?, ?, ?, ?, date('now'), ?, date('now','-30 days'), ?)",
+        [$gymId, $name, $phone, $svcName, $fee, $due, $exp, $status]
+    );
+}
+
+echo "Seed complete.\n";
+echo "Owner login:  owner@gymtest.com / test1234\n";
+echo "Member login: member@gymtest.com / member123\n";
+
+
+--------------------------------------------------------------------------------
+FILE: /workspaces/gym-manager/php gym manager/db/migrate.php
+--------------------------------------------------------------------------------
+<?php
+require_once __DIR__ . '/../config/app.php';
+require_once __DIR__ . '/../config/db.php';
+require_once __DIR__ . '/../core/Database.php';
+
+$driver = $_ENV['DB_DRIVER'] ?? 'sqlite';
+$schema = $driver === 'mysql'
+    ? file_get_contents(__DIR__ . '/schema_mysql.sql')
+    : file_get_contents(__DIR__ . '/schema.sql');
+
+$db = getDB();
+
+// Split on semicolons, run each statement
+$statements = array_filter(array_map('trim', explode(';', $schema)));
+foreach ($statements as $stmt) {
+    if (!empty($stmt)) {
+        try {
+            $db->exec($stmt);
+        } catch (Exception $e) {
+            echo "\n❌ MIGRATION FAILED\n";
+            echo "Statement: $stmt\n";
+            echo "Error: " . $e->getMessage() . "\n";
+            exit(1);
+        }
+    }
+}
+
+echo "Migration complete ({$driver}).\n";
+
+
+--------------------------------------------------------------------------------
+FILE: /workspaces/gym-manager/php gym manager/db/schema_mysql.sql
+--------------------------------------------------------------------------------
+-- Run this on production MySQL. Differences from SQLite schema:
+-- 1. AUTOINCREMENT -> AUTO_INCREMENT
+-- 2. datetime('now') -> NOW()
+-- 3. date('now') -> CURDATE()
+-- 4. TEXT for dates -> DATETIME / DATE types
+-- 5. INTEGER for booleans -> TINYINT(1)
+-- 6. Add ENGINE=InnoDB CHARSET=utf8mb4
+
+CREATE TABLE IF NOT EXISTS users (
+    id          INT AUTO_INCREMENT PRIMARY KEY,
+    email       VARCHAR(255) NOT NULL UNIQUE,
+    password    VARCHAR(255) NOT NULL,
+    role        ENUM('owner','member') NOT NULL DEFAULT 'owner',
+    created_at  DATETIME NOT NULL DEFAULT NOW()
+) ENGINE=InnoDB CHARSET=utf8mb4;
+
+CREATE TABLE IF NOT EXISTS gyms (
+    id                  INT AUTO_INCREMENT PRIMARY KEY,
+    user_id             INT NOT NULL UNIQUE,
+    gym_name            VARCHAR(255) NOT NULL,
+    owner_name          VARCHAR(255),
+    owner_phone         VARCHAR(20),
+    gym_address         TEXT,
+    upi_id              VARCHAR(100),
+    trial_start_date    DATE NOT NULL DEFAULT (CURDATE()),
+    created_at          DATETIME NOT NULL DEFAULT NOW(),
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+) ENGINE=InnoDB CHARSET=utf8mb4;
+
+CREATE TABLE IF NOT EXISTS gym_services (
+    id          INT AUTO_INCREMENT PRIMARY KEY,
+    gym_id      INT NOT NULL,
+    name        VARCHAR(100) NOT NULL,
+    price       DECIMAL(10,2) NOT NULL DEFAULT 0.00,
+    is_active   TINYINT(1) NOT NULL DEFAULT 1,
+    created_at  DATETIME NOT NULL DEFAULT NOW(),
+    FOREIGN KEY (gym_id) REFERENCES gyms(id) ON DELETE CASCADE
+) ENGINE=InnoDB CHARSET=utf8mb4;
+
+CREATE TABLE IF NOT EXISTS gym_settings (
+    id                      INT AUTO_INCREMENT PRIMARY KEY,
+    gym_id                  INT NOT NULL UNIQUE,
+    template_overdue        TEXT NOT NULL,
+    template_expiring_soon  TEXT NOT NULL,
+    template_expires_today  TEXT NOT NULL,
+    template_expired        TEXT NOT NULL,
+    template_rejoin         TEXT NOT NULL,
+    dead_threshold_days     INT NOT NULL DEFAULT 60,
+    updated_at              DATETIME NOT NULL DEFAULT NOW(),
+    FOREIGN KEY (gym_id) REFERENCES gyms(id) ON DELETE CASCADE
+) ENGINE=InnoDB CHARSET=utf8mb4;
+
+CREATE TABLE IF NOT EXISTS members (
+    id              INT AUTO_INCREMENT PRIMARY KEY,
+    gym_id          INT NOT NULL,
+    user_id         INT,
+    member_name     VARCHAR(255) NOT NULL,
+    phone_number    VARCHAR(20) NOT NULL,
+    member_email    VARCHAR(255),
+    service_id      INT,
+    service_name    VARCHAR(100) NOT NULL,
+    monthly_fee     DECIMAL(10,2) NOT NULL DEFAULT 0.00,
+    pending_due     DECIMAL(10,2) NOT NULL DEFAULT 0.00,
+    start_date      DATE NOT NULL,
+    expiry_date     DATE NOT NULL,
+    joined_date     DATE NOT NULL,
+    last_renewed_at DATE,
+    status          ENUM('active','overdue','dead','rejoined') NOT NULL DEFAULT 'active',
+    notes           TEXT,
+    created_at      DATETIME NOT NULL DEFAULT NOW(),
+    updated_at      DATETIME NOT NULL DEFAULT NOW(),
+    UNIQUE KEY unique_member_phone (gym_id, phone_number),
+    FOREIGN KEY (gym_id)     REFERENCES gyms(id)         ON DELETE CASCADE,
+    FOREIGN KEY (user_id)    REFERENCES users(id)        ON DELETE SET NULL,
+    FOREIGN KEY (service_id) REFERENCES gym_services(id) ON DELETE SET NULL
+) ENGINE=InnoDB CHARSET=utf8mb4;
+
+CREATE TABLE IF NOT EXISTS payments (
+    id            INT AUTO_INCREMENT PRIMARY KEY,
+    gym_id        INT NOT NULL,
+    member_id     INT NOT NULL,
+    amount_paid   DECIMAL(10,2) NOT NULL,
+    payment_date  DATE NOT NULL DEFAULT (CURDATE()),
+    note          VARCHAR(255),
+    created_at    DATETIME NOT NULL DEFAULT NOW(),
+    FOREIGN KEY (gym_id)    REFERENCES gyms(id)     ON DELETE CASCADE,
+    FOREIGN KEY (member_id) REFERENCES members(id)  ON DELETE CASCADE
+) ENGINE=InnoDB CHARSET=utf8mb4;
+
+CREATE TABLE IF NOT EXISTS member_history (
+    id          INT AUTO_INCREMENT PRIMARY KEY,
+    gym_id      INT NOT NULL,
+    member_id   INT NOT NULL,
+    event_type  ENUM('joined','renewed','marked_dead','rejoined') NOT NULL,
+    event_date  DATE NOT NULL DEFAULT (CURDATE()),
+    details     JSON,
+    created_at  DATETIME NOT NULL DEFAULT NOW(),
+    FOREIGN KEY (gym_id)    REFERENCES gyms(id)     ON DELETE CASCADE,
+    FOREIGN KEY (member_id) REFERENCES members(id)  ON DELETE CASCADE
+) ENGINE=InnoDB CHARSET=utf8mb4;
+
+CREATE INDEX idx_members_gym_id    ON members(gym_id);
+CREATE INDEX idx_members_status    ON members(gym_id, status);
+CREATE INDEX idx_members_expiry    ON members(gym_id, expiry_date);
+CREATE INDEX idx_members_phone     ON members(gym_id, phone_number);
+CREATE INDEX idx_payments_gym_date ON payments(gym_id, payment_date);
+CREATE INDEX idx_history_member    ON member_history(member_id);
+
+
+--------------------------------------------------------------------------------
+FILE: /workspaces/gym-manager/php gym manager/core/Request.php
+--------------------------------------------------------------------------------
+<?php
+class Request {
+    public static function get(string $key, $default = null) {
+        return self::sanitize($_GET[$key] ?? $default);
+    }
+
+    public static function post(string $key, $default = null) {
+        return self::sanitize($_POST[$key] ?? $default);
+    }
+
+    public static function sanitize($value) {
+        if (is_array($value)) {
+            return array_map([self::class, 'sanitize'], $value);
+        }
+        if (is_string($value)) {
+            return htmlspecialchars(trim($value), ENT_QUOTES, 'UTF-8');
+        }
+        return $value;
+    }
+
+    public static function json() {
+        return json_decode(file_get_contents('php://input'), true);
+    }
+}
+
+
+--------------------------------------------------------------------------------
+FILE: /workspaces/gym-manager/php gym manager/core/CSRF.php
+--------------------------------------------------------------------------------
+<?php
+class CSRF {
+    public static function token(): string {
+        if (empty($_SESSION['csrf_token'])) {
+            $_SESSION['csrf_token'] = bin2hex(random_bytes(32));
+        }
+        return $_SESSION['csrf_token'];
+    }
+
+    public static function validate(): bool {
+        $token = $_POST['csrf_token'] ?? $_SERVER['HTTP_X_CSRF_TOKEN'] ?? '';
+        return hash_equals($_SESSION['csrf_token'] ?? '', $token);
+    }
+
+    public static function field(): string {
+        return '<input type="hidden" name="csrf_token" value="' . self::token() . '">';
+    }
+
+    public static function assertValid(): void {
+        if (!self::validate()) {
+            http_response_code(403);
+            echo json_encode(['success' => false, 'error' => 'Invalid CSRF token']);
+            exit;
+        }
+    }
+}
+
+
+--------------------------------------------------------------------------------
+FILE: /workspaces/gym-manager/php gym manager/core/Database.php
+--------------------------------------------------------------------------------
+<?php
+// AGENT: ALL database access goes through this class.
+// NEVER use getDB() directly in controllers or models — use Database::getInstance().
+
+class Database {
+    private static ?Database $instance = null;
+    private PDO $pdo;
+
+    private function __construct() {
+        $this->pdo = getDB();
+    }
+
+    public static function getInstance(): self {
+        if (self::$instance === null) {
+            self::$instance = new self();
+        }
+        return self::$instance;
+    }
+
+    // Run a query with bound params, return statement
+    public function query(string $sql, array $params = []): PDOStatement {
+        $stmt = $this->pdo->prepare($sql);
+        $stmt->execute($params);
+        return $stmt;
+    }
+
+    // Fetch one row
+    public function fetch(string $sql, array $params = []): ?array {
+        $result = $this->query($sql, $params)->fetch();
+        return $result ?: null;
+    }
+
+    // Fetch all rows
+    public function fetchAll(string $sql, array $params = []): array {
+        return $this->query($sql, $params)->fetchAll();
+    }
+
+    // Execute INSERT/UPDATE/DELETE, return affected rows
+    public function execute(string $sql, array $params = []): int {
+        return $this->query($sql, $params)->rowCount();
+    }
+
+    // Get last inserted ID
+    public function lastInsertId(): string {
+        return $this->pdo->lastInsertId();
+    }
+
+    // Transaction helpers
+    public function beginTransaction(): void { $this->pdo->beginTransaction(); }
+    public function commit(): void { $this->pdo->commit(); }
+    public function rollBack(): void { $this->pdo->rollBack(); }
+}
+
+
+--------------------------------------------------------------------------------
+FILE: /workspaces/gym-manager/php gym manager/core/Response.php
+--------------------------------------------------------------------------------
+<?php
+class Response {
+    public static function json(array $data, int $status = 200): void {
+        header('Content-Type: application/json');
+        http_response_code($status);
+        echo json_encode($data);
+        exit;
+    }
+
+    public static function success(array $data = [], string $message = 'Success'): void {
+        self::json(['success' => true, 'message' => $message, ...$data]);
+    }
+
+    public static function error(string $message, int $status = 400): void {
+        self::json(['success' => false, 'error' => $message], $status);
+    }
+
+    public static function redirect(string $url): void {
+        header("Location: $url");
+        if (!defined('TEST_MODE')) {
+            exit;
+        }
+    }
+}
+
+
+--------------------------------------------------------------------------------
+FILE: /workspaces/gym-manager/php gym manager/core/Helpers.php
+--------------------------------------------------------------------------------
+<?php
+function formatDate(string $date, string $format = 'd/m/Y'): string {
+    return date($format, strtotime($date));
+}
+
+function daysLeft(string $expiryDate): int {
+    $today = strtotime(date('Y-m-d'));
+    $expiry = strtotime($expiryDate);
+    return (int)round(($expiry - $today) / 86400);
+}
+
+function isExpired(string $expiryDate): bool {
+    return daysLeft($expiryDate) < 0;
+}
+
+function buildWhatsappLink(array $member, array $settings, string $gymName): string {
+    $phone = preg_replace('/\D/', '', $member['phone_number']);
+    
+    // Handle Indian phone number edge cases:
+    // 1. Remove leading 0 if present
+    if (str_starts_with($phone, '0')) {
+        $phone = substr($phone, 1);
+    }
+    // 2. Remove leading 91 if present to normalize
+    if (str_starts_with($phone, '91') && strlen($phone) === 12) {
+        $phone = substr($phone, 2);
+    }
+    // 3. Force prepend 91 for wa.me
+    if (strlen($phone) === 10) {
+        $phone = '91' . $phone;
+    }
+
+    $today    = date('Y-m-d');
+    $expiry   = $member['expiry_date'];
+    $daysDiff = (int)round((strtotime($expiry) - strtotime($today)) / 86400);
+    $due      = (float)$member['pending_due'];
+
+    if ($due > 0) {
+        $template = $settings['template_overdue'] ?? 'Hi {name}, your pending due is ₹{due}.';
+    } elseif ($daysDiff > 0) {
+        $template = $settings['template_expiring_soon'] ?? 'Hi {name}, your membership expires in {days} days.';
+    } elseif ($daysDiff === 0) {
+        $template = $settings['template_expires_today'] ?? 'Hi {name}, your membership expires today!';
+    } else {
+        $template = $settings['template_expired'] ?? 'Hi {name}, your membership expired {days} days ago.';
+    }
+
+    $message = str_replace(
+        ['{name}', '{due}', '{days}', '{expiry_date}', '{gym_name}'],
+        [
+            $member['member_name'],
+            '₹' . number_format($due, 0),
+            abs($daysDiff),
+            date('d/m/Y', strtotime($expiry)),
+            $gymName
+        ],
+        $template
+    );
+
+    return 'https://wa.me/' . $phone . '?text=' . rawurlencode($message);
+}
+
+
+--------------------------------------------------------------------------------
+FILE: /workspaces/gym-manager/php gym manager/core/Auth.php
+--------------------------------------------------------------------------------
+<?php
+class Auth {
+    public static function start(): void {
+        if (session_status() === PHP_SESSION_NONE) {
+            session_start();
+        }
+    }
+
+    public static function login(int $userId, string $role, ?int $gymId, string $gymName = '', ?string $trialStartDate = null): void {
+        session_regenerate_id(true); // Prevent session fixation
+        $_SESSION['user_id']  = $userId;
+        $_SESSION['role']     = $role;
+        $_SESSION['gym_id']   = $gymId;
+        $_SESSION['gym_name'] = $gymName;
+        $_SESSION['trial_start_date'] = $trialStartDate;
+    }
+
+    public static function logout(): void {
+        session_unset();
+        session_destroy();
+    }
+
+    public static function user(): ?array {
+        return isset($_SESSION['user_id']) ? [
+            'id'       => $_SESSION['user_id'],
+            'role'     => $_SESSION['role'],
+            'gym_id'   => $_SESSION['gym_id'],
+            'gym_name' => $_SESSION['gym_name'],
+        ] : null;
+    }
+
+    public static function guard(?string $role = null): void {
+        self::start();
+        
+        $isApi = str_contains($_SERVER['REQUEST_URI'], '/api/') || 
+                 (isset($_SERVER['HTTP_X_REQUESTED_WITH']) && $_SERVER['HTTP_X_REQUESTED_WITH'] === 'XMLHttpRequest');
+
+        if (!isset($_SESSION['user_id'])) {
+            if ($isApi) {
+                http_response_code(401);
+                echo json_encode(['success' => false, 'error' => 'Session expired. Please login again.']);
+                exit;
+            }
+            header('Location: /login');
+            if (!defined('TEST_MODE')) exit;
+        }
+        if ($role && $_SESSION['role'] !== $role) {
+            if ($isApi) {
+                http_response_code(403);
+                echo json_encode(['success' => false, 'error' => 'Unauthorized access.']);
+                exit;
+            }
+            header('Location: /dashboard');
+            if (!defined('TEST_MODE')) exit;
+        }
+    }
+
+    public static function gymId(): int {
+        return (int)($_SESSION['gym_id'] ?? 0);
+    }
+
+    public static function trialGuard(): void {
+        $userId = self::user()['id'] ?? 0;
+        if (!$userId) return;
+
+        $trialStartDate = $_SESSION['trial_start_date'] ?? null;
+        
+        if (!$trialStartDate) {
+            // Fallback: load it from DB and update session
+            $db = Database::getInstance();
+            $gym = $db->fetch("SELECT trial_start_date FROM gyms WHERE user_id = ?", [$userId]);
+            if ($gym) {
+                $trialStartDate = $gym['trial_start_date'];
+                $_SESSION['trial_start_date'] = $trialStartDate;
+            }
+        }
+        
+        if ($trialStartDate) {
+            $start = strtotime($trialStartDate);
+            $today = strtotime(date('Y-m-d'));
+            $daysUsed = (int)(($today - $start) / 86400);
+            
+            if ($daysUsed >= TRIAL_DAYS) {
+                // Only redirect if we are not already on the paywall or doing something essential
+                $uri = parse_url($_SERVER['REQUEST_URI'], PHP_URL_PATH);
+                if ($uri !== '/paywall' && !str_contains($uri, '/api/settings')) {
+                    header('Location: /paywall');
+                    exit;
+                }
+            }
+        }
+    }
+}
+
+
+--------------------------------------------------------------------------------
+FILE: /workspaces/gym-manager/php gym manager/models/AnalyticsModel.php
+--------------------------------------------------------------------------------
+<?php
+class AnalyticsModel {
+    private Database $db;
+
+    public function __construct() {
+        $this->db = Database::getInstance();
+    }
+
+    public function getStats(int $gymId): array {
+        $memberModel = new MemberModel();
+        $counts = $memberModel->countsByStatus($gymId);
+        
+        $paymentModel = new PaymentModel();
+        $thisMonthCollection = $paymentModel->getMonthlyTotal($gymId);
+
+        $newJoins = $this->db->fetch("SELECT COUNT(*) as c FROM members WHERE gym_id = ? AND joined_date >= date('now', 'start of month')", [$gymId])['c'];
+        $renewals = $this->db->fetch("SELECT COUNT(*) as c FROM member_history WHERE gym_id = ? AND event_type = 'renewed' AND event_date >= date('now', 'start of month')", [$gymId])['c'];
+
+        return [
+            'total_active' => $counts['active'],
+            'total_overdue' => $counts['overdue'],
+            'total_dead' => $counts['dead'],
+            'new_joins_this_month' => (int)$newJoins,
+            'renewals_this_month' => (int)$renewals,
+            'this_month_collection' => $thisMonthCollection,
+        ];
+    }
+
+    public function getMonthlyCollections(int $gymId): array {
+        $driver = $_ENV['DB_DRIVER'] ?? 'sqlite';
+        
+        if ($driver === 'sqlite') {
+            $sql = "SELECT strftime('%Y-%m', payment_date) AS month, SUM(amount_paid) AS total 
+                    FROM payments WHERE gym_id = ? AND payment_date >= date('now', '-6 months') 
+                    GROUP BY month ORDER BY month ASC";
+        } else {
+            $sql = "SELECT DATE_FORMAT(payment_date, '%Y-%m') AS month, SUM(amount_paid) AS total 
+                    FROM payments WHERE gym_id = ? AND payment_date >= DATE_SUB(CURDATE(), INTERVAL 6 MONTH) 
+                    GROUP BY month ORDER BY month ASC";
+        }
+        
+        return $this->db->fetchAll($sql, [$gymId]);
+    }
+
+    public function getMemberCountTrend(int $gymId): array {
+        // Simplified trend for MVP: Count of members joined per month for last 6 months
+        $driver = $_ENV['DB_DRIVER'] ?? 'sqlite';
+        if ($driver === 'sqlite') {
+            $sql = "SELECT strftime('%Y-%m', joined_date) AS month, COUNT(*) as count 
+                    FROM members WHERE gym_id = ? AND joined_date >= date('now', '-6 months') 
+                    GROUP BY month ORDER BY month ASC";
+        } else {
+            $sql = "SELECT DATE_FORMAT(joined_date, '%Y-%m') AS month, COUNT(*) as count 
+                    FROM members WHERE gym_id = ? AND joined_date >= DATE_SUB(CURDATE(), INTERVAL 6 MONTH) 
+                    GROUP BY month ORDER BY month ASC";
+        }
+        return $this->db->fetchAll($sql, [$gymId]);
+    }
+
+    public function getServiceBreakdown(int $gymId): array {
+        $sql = "SELECT s.name as service, COUNT(m.id) as count 
+                FROM gym_services s 
+                JOIN members m ON s.id = m.service_id 
+                WHERE s.gym_id = ? AND m.status = 'active' 
+                GROUP BY s.name";
+        return $this->db->fetchAll($sql, [$gymId]);
+    }
+}
+
+
+--------------------------------------------------------------------------------
+FILE: /workspaces/gym-manager/php gym manager/models/MemberModel.php
+--------------------------------------------------------------------------------
+<?php
+class MemberModel {
+    private Database $db;
+
+    public function __construct() {
+        $this->db = Database::getInstance();
+    }
+
+    public function getAllByGym(int $gymId, string $status = 'all', string $search = ''): array {
+        $sql = "SELECT * FROM members WHERE gym_id = ?";
+        $params = [$gymId];
+
+
+        if ($status !== 'all') {
+            if ($status === 'running') {
+                $sql .= " AND status = 'active' AND expiry_date >= date('now')";
+            } elseif ($status === 'overdue') {
+                $sql .= " AND (status IN ('active','overdue') AND (expiry_date < date('now') OR pending_due > 0))";
+            } elseif ($status === 'dead') {
+                $sql .= " AND status = 'dead'";
+            } else {
+                $sql .= " AND status = ?";
+                $params[] = $status;
+            }
+        }
+
+        if (!empty($search)) {
+            $sql .= " AND (member_name LIKE ? OR phone_number LIKE ?)";
+            $params[] = "%$search%";
+            $params[] = "%$search%";
+        }
+
+        $sql .= " ORDER BY CASE WHEN status = 'active' THEN 1 WHEN status = 'overdue' THEN 2 ELSE 3 END, expiry_date ASC";
+
+        return $this->db->fetchAll($sql, $params);
+    }
+
+    public function getById(int $id, int $gymId): ?array {
+        return $this->db->fetch("SELECT * FROM members WHERE id = ? AND gym_id = ?", [$id, $gymId]);
+    }
+
+    public function findByPhone(string $phone, int $gymId): ?array {
+        return $this->db->fetch("SELECT * FROM members WHERE phone_number = ? AND gym_id = ?", [$phone, $gymId]);
+    }
+
+    public function add(array $data): int {
+        $sql = "INSERT INTO members (gym_id, member_name, phone_number, member_email, service_id, service_name, monthly_fee, pending_due, start_date, expiry_date, joined_date, status) 
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
+        
+        $this->db->execute($sql, [
+            $data['gym_id'],
+            $data['member_name'],
+            $data['phone_number'],
+            $data['member_email'] ?? null,
+            $data['service_id'] ?? null,
+            $data['service_name'],
+            $data['monthly_fee'],
+            $data['pending_due'],
+            $data['start_date'],
+            $data['expiry_date'],
+            $data['joined_date'] ?? date('Y-m-d'),
+            $data['status'] ?? 'active'
+        ]);
+
+        return (int)$this->db->lastInsertId();
+    }
+
+    public function edit(int $id, int $gymId, array $data): bool {
+        $allowedFields = [
+            'member_name', 'phone_number', 'member_email', 
+            'service_id', 'service_name', 'monthly_fee', 
+            'pending_due', 'notes'
+        ];
+        
+        $fields = [];
+        $params = [];
+        foreach ($data as $key => $val) {
+            if (in_array($key, $allowedFields)) {
+                $fields[] = "$key = ?";
+                $params[] = $val;
+            }
+        }
+        
+        if (empty($fields)) return false;
+
+        $params[] = $id;
+        $params[] = $gymId;
+
+        $sql = "UPDATE members SET " . implode(', ', $fields) . ", updated_at = datetime('now') WHERE id = ? AND gym_id = ?";
+        return $this->db->execute($sql, $params) > 0;
+    }
+
+    public function renew(int $id, int $gymId, int $months = 1): bool {
+        $member = $this->getById($id, $gymId);
+        if (!$member) return false;
+
+        $currentExpiry = strtotime($member['expiry_date']);
+        $today = strtotime(date('Y-m-d'));
+        $baseDate = max($today, $currentExpiry);
+        $newExpiry = date('Y-m-d', strtotime("+$months months", $baseDate));
+
+        return $this->db->execute(
+            "UPDATE members SET expiry_date = ?, status = 'active', last_renewed_at = date('now'), updated_at = datetime('now') WHERE id = ? AND gym_id = ?",
+            [$newExpiry, $id, $gymId]
+        ) > 0;
+    }
+
+    public function markDead(int $id, int $gymId): bool {
+        return $this->db->execute(
+            "UPDATE members SET status = 'dead', updated_at = datetime('now') WHERE id = ? AND gym_id = ?",
+            [$id, $gymId]
+        ) > 0;
+    }
+
+    public function rejoin(int $id, int $gymId, array $data): bool {
+        $sql = "UPDATE members SET 
+                status = 'rejoined', 
+                start_date = ?, 
+                expiry_date = ?, 
+                service_id = ?, 
+                service_name = ?, 
+                monthly_fee = ?, 
+                pending_due = 0, 
+                last_renewed_at = date('now'), 
+                updated_at = datetime('now') 
+                WHERE id = ? AND gym_id = ?";
+        
+        return $this->db->execute($sql, [
+            $data['start_date'],
+            $data['expiry_date'],
+            $data['service_id'],
+            $data['service_name'],
+            $data['monthly_fee'],
+            $id,
+            $gymId
+        ]) > 0;
+    }
+
+    public function countsByStatus(int $gymId): array {
+        $results = $this->db->fetchAll("SELECT status, COUNT(*) as count FROM members WHERE gym_id = ? GROUP BY status", [$gymId]);
+        $counts = ['active' => 0, 'overdue' => 0, 'dead' => 0, 'all' => 0];
+        foreach ($results as $row) {
+            $counts[$row['status']] = (int)$row['count'];
+            $counts['all'] += (int)$row['count'];
+        }
+        return $counts;
+    }
+
+    public function runAutoDeadUpdate(int $gymId): void {
+        $settings = $this->db->fetch("SELECT dead_threshold_days FROM gym_settings WHERE gym_id = ?", [$gymId]);
+        $threshold = $settings['dead_threshold_days'] ?? 60;
+        $deadCutoff = date('Y-m-d', strtotime("-{$threshold} days"));
+
+        // 1. Active -> Overdue if expired
+        $this->db->execute(
+            "UPDATE members SET status = 'overdue', updated_at = datetime('now') WHERE gym_id = ? AND status = 'active' AND expiry_date < date('now')",
+            [$gymId]
+        );
+
+        // 2. Active/Overdue -> Dead if past threshold
+        $this->db->execute(
+            "UPDATE members SET status = 'dead', updated_at = datetime('now') WHERE gym_id = ? AND status IN ('active','overdue') AND expiry_date < ?",
+            [$gymId, $deadCutoff]
+        );
+    }
+}
+
+
+--------------------------------------------------------------------------------
+FILE: /workspaces/gym-manager/php gym manager/models/SettingsModel.php
+--------------------------------------------------------------------------------
+<?php
+class SettingsModel {
+    private Database $db;
+
+    public function __construct() {
+        $this->db = Database::getInstance();
+    }
+
+    public function get(int $gymId): ?array {
+        return $this->db->fetch("SELECT * FROM gym_settings WHERE gym_id = ?", [$gymId]);
+    }
+
+    public function save(int $gymId, array $data): bool {
+        // Whitelist allowed keys to prevent SQL injection via array keys
+        $allowedKeys = [
+            'template_overdue', 'template_expiring_soon', 'template_expires_today',
+            'template_expired', 'template_rejoin', 'dead_threshold_days'
+        ];
+        $filteredData = array_intersect_key($data, array_flip($allowedKeys));
+
+        // Insert or Update
+        $existing = $this->get($gymId);
+        if ($existing) {
+            $fields = [];
+            $params = [];
+            foreach ($filteredData as $k => $v) {
+                $fields[] = "$k = ?";
+                $params[] = $v;
+            }
+            $params[] = $gymId;
+            $sql = "UPDATE gym_settings SET " . implode(', ', $fields) . ", updated_at = datetime('now') WHERE gym_id = ?";
+            return $this->db->execute($sql, $params) > 0;
+        } else {
+            $cols = implode(', ', array_keys($filteredData));
+            $placeholders = implode(', ', array_fill(0, count($filteredData), '?'));
+            $sql = "INSERT INTO gym_settings (gym_id, $cols) VALUES (?, $placeholders)";
+            $params = array_merge([$gymId], array_values($filteredData));
+            return $this->db->execute($sql, $params) > 0;
+        }
+    }
+}
+
+
+--------------------------------------------------------------------------------
+FILE: /workspaces/gym-manager/php gym manager/models/HistoryModel.php
+--------------------------------------------------------------------------------
+<?php
+class HistoryModel {
+    private Database $db;
+
+    public function __construct() {
+        $this->db = Database::getInstance();
+    }
+
+    public function log(int $gymId, int $memberId, string $eventType, string $details = ''): void {
+        $this->db->execute(
+            "INSERT INTO member_history (gym_id, member_id, event_type, event_date, details) VALUES (?, ?, ?, date('now'), ?)",
+            [$gymId, $memberId, $eventType, $details]
+        );
+    }
+
+    public function getByMember(int $memberId): array {
+        return $this->db->fetchAll("SELECT * FROM member_history WHERE member_id = ? ORDER BY event_date DESC", [$memberId]);
+    }
+}
+
+
+--------------------------------------------------------------------------------
+FILE: /workspaces/gym-manager/php gym manager/models/GymModel.php
+--------------------------------------------------------------------------------
+<?php
+class GymModel {
+    private Database $db;
+
+    public function __construct() {
+        $this->db = Database::getInstance();
+    }
+
+    public function getById(int $id): ?array {
+        return $this->db->fetch("SELECT * FROM gyms WHERE id = ?", [$id]);
+    }
+
+    public function getByUserId(int $userId): ?array {
+        return $this->db->fetch("SELECT * FROM gyms WHERE user_id = ?", [$userId]);
+    }
+
+    public function update(int $id, array $data): bool {
+        $fields = [];
+        $params = [];
+        foreach ($data as $key => $val) {
+            $fields[] = "$key = ?";
+            $params[] = $val;
+        }
+        $params[] = $id;
+        $sql = "UPDATE gyms SET " . implode(', ', $fields) . " WHERE id = ?";
+        return $this->db->execute($sql, $params) > 0;
+    }
+}
+
+
+--------------------------------------------------------------------------------
+FILE: /workspaces/gym-manager/php gym manager/models/PaymentModel.php
+--------------------------------------------------------------------------------
+<?php
+class PaymentModel {
+    private Database $db;
+
+    public function __construct() {
+        $this->db = Database::getInstance();
+    }
+
+    public function getMonthlyTotal(int $gymId): float {
+        $currentMonth = date('Y-m');
+        $sql = "SELECT SUM(amount_paid) as total FROM payments WHERE gym_id = ? AND payment_date LIKE ?";
+        $res = $this->db->fetch($sql, [$gymId, "$currentMonth%"]);
+        return (float)($res['total'] ?? 0);
+    }
+}
+
+
+--------------------------------------------------------------------------------
+FILE: /workspaces/gym-manager/php gym manager/models/ServiceModel.php
+--------------------------------------------------------------------------------
+<?php
+class ServiceModel {
+    private Database $db;
+
+    public function __construct() {
+        $this->db = Database::getInstance();
+    }
+
+    public function getActive(int $gymId): array {
+        return $this->db->fetchAll("SELECT * FROM gym_services WHERE gym_id = ? AND is_active = 1", [$gymId]);
+    }
+
+    public function getById(int $id, int $gymId): ?array {
+        return $this->db->fetch("SELECT * FROM gym_services WHERE id = ? AND gym_id = ?", [$id, $gymId]);
+    }
+
+    public function add(array $data): int {
+        $this->db->execute(
+            "INSERT INTO gym_services (gym_id, name, price) VALUES (?, ?, ?)",
+            [$data['gym_id'], $data['name'], $data['price']]
+        );
+        return (int)$this->db->lastInsertId();
+    }
+
+    public function edit(int $id, int $gymId, array $data): bool {
+        return $this->db->execute(
+            "UPDATE gym_services SET name = ?, price = ? WHERE id = ? AND gym_id = ?",
+            [$data['name'], $data['price'], $id, $gymId]
+        ) > 0;
+    }
+
+    public function delete(int $id, int $gymId): bool {
+        // Soft delete
+        return $this->db->execute(
+            "UPDATE gym_services SET is_active = 0 WHERE id = ? AND gym_id = ?",
+            [$id, $gymId]
+        ) > 0;
+    }
+}
+
+
+--------------------------------------------------------------------------------
+FILE: /workspaces/gym-manager/php gym manager/config/db.php
+--------------------------------------------------------------------------------
+<?php
+// AGENT: This file is the ONLY place that reads DB_DRIVER.
+// NEVER reference SQLite or MySQL directly outside this file.
+
+function getDB(): PDO {
+    static $pdo = null;
+    if ($pdo !== null) return $pdo;
+
+    $driver = $_ENV['DB_DRIVER'] ?? 'sqlite';
+
+    if ($driver === 'sqlite') {
+        $path = $_ENV['DB_SQLITE_PATH'] ?? '__DIR__/db/gym.db';
+        
+        // If path contains __DIR__, resolve it relative to this config file
+        if (str_contains($path, '__DIR__')) {
+            $path = str_replace('__DIR__', __DIR__ . '/..', $path);
+        }
+        
+        $pdo = new PDO('sqlite:' . $path);
+        $pdo->exec('PRAGMA foreign_keys = ON;');
+        $pdo->exec('PRAGMA journal_mode = WAL;');
+    } elseif ($driver === 'mysql') {
+
+        $dsn = sprintf(
+            'mysql:host=%s;port=%s;dbname=%s;charset=utf8mb4',
+            $_ENV['DB_HOST'],
+            $_ENV['DB_PORT'] ?? 3306,
+            $_ENV['DB_NAME']
+        );
+        $pdo = new PDO($dsn, $_ENV['DB_USER'], $_ENV['DB_PASS']);
+    } else {
+        throw new RuntimeException("Unknown DB_DRIVER: $driver");
+    }
+
+    $pdo->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
+    $pdo->setAttribute(PDO::ATTR_DEFAULT_FETCH_MODE, PDO::FETCH_ASSOC);
+    return $pdo;
+}
+
+
+--------------------------------------------------------------------------------
+FILE: /workspaces/gym-manager/php gym manager/config/app.php
+--------------------------------------------------------------------------------
+<?php
+// AGENT: Load .env FIRST before anything else. Use this file as the bootstrap.
+date_default_timezone_set('Asia/Kolkata');
+
+$envFile = __DIR__ . '/../.env';
+
+if (file_exists($envFile)) {
+    $lines = file($envFile, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES);
+    foreach ($lines as $line) {
+        if (str_starts_with(trim($line), '#') || !str_contains($line, '=')) continue;
+        [$key, $val] = explode('=', $line, 2);
+        $_ENV[trim($key)] = trim($val);
+    }
+}
+
+define('APP_NAME',   $_ENV['APP_NAME']   ?? 'Gym Manager');
+define('APP_ENV',    $_ENV['APP_ENV']    ?? 'development');
+define('APP_SECRET', $_ENV['APP_SECRET'] ?? 'changeme');
+define('TRIAL_DAYS', (int)($_ENV['TRIAL_DAYS'] ?? 14));
+
+
+--------------------------------------------------------------------------------
+FILE: /workspaces/gym-manager/php gym manager/controllers/SettingsController.php
+--------------------------------------------------------------------------------
+<?php
+class SettingsController {
+    private SettingsModel $settingsModel;
+
+    public function __construct() {
+        $this->settingsModel = new SettingsModel();
+    }
+
+    public function get(): void {
+        Auth::guard('owner');
+        Response::success(['settings' => $this->settingsModel->get(Auth::gymId())]);
+    }
+
+    public function save(): void {
+        Auth::guard('owner');
+        CSRF::assertValid();
+        $data = Request::json() ?? $_POST;
+        
+        $sanitized = [];
+        foreach ($data as $k => $v) {
+            $sanitized[$k] = Request::sanitize($v);
+        }
+
+        if ($this->settingsModel->save(Auth::gymId(), $sanitized)) {
+            Response::success(['message' => 'Settings saved']);
+        } else {
+            Response::error('Save failed');
+        }
+    }
+
+    public function showPage(): void {
+        Auth::guard('owner');
+        $gymId = Auth::gymId();
+        $db = Database::getInstance();
+        $gym = $db->fetch("SELECT * FROM gyms WHERE id = ?", [$gymId]);
+        $settings = $this->settingsModel->get($gymId);
+        $services = (new ServiceModel())->getActive($gymId);
+        
+        require_once __DIR__ . '/../views/settings/index.php';
+    }
+}
+
+
+--------------------------------------------------------------------------------
+FILE: /workspaces/gym-manager/php gym manager/controllers/PortalController.php
+--------------------------------------------------------------------------------
+<?php
+class PortalController {
+    public function index(): void {
+        Auth::guard();
+        $user = Auth::user();
+
+        if ($user['role'] === 'owner') {
+            Response::redirect('/dashboard');
+        }
+
+        $db = Database::getInstance();
+        $member = $db->fetch("SELECT * FROM members WHERE user_id = ? LIMIT 1", [$user['id']]);
+
+        if (!$member) {
+            require_once __DIR__ . '/../views/layout/header.php';
+            echo '<div class="page-shell"><div class="card" style="text-align:center;"><h2>No Membership Found</h2><p>Please contact your gym owner to activate your portal access.</p></div></div>';
+            require_once __DIR__ . '/../views/layout/footer.php';
+            return;
+        }
+
+        // Calculate days left
+        $today = strtotime(date('Y-m-d'));
+        $expiry = strtotime($member['expiry_date']);
+        $daysLeft = (int)round(($expiry - $today) / 86400);
+        
+        $statusColor = 'text-green-500';
+        if ($daysLeft <= 0) $statusColor = 'text-red-500';
+        elseif ($daysLeft <= 10) $statusColor = 'text-orange-500';
+
+        require_once __DIR__ . '/../views/portal/index.php';
+    }
+}
+
+
+--------------------------------------------------------------------------------
+FILE: /workspaces/gym-manager/php gym manager/controllers/GymController.php
+--------------------------------------------------------------------------------
+<?php
+class GymController {
+    public function showSetup(): void {
+        Auth::guard('owner');
+        require_once __DIR__ . '/../views/setup/create_gym.php';
+    }
+
+    public function createGym(): void {
+        Auth::guard('owner');
+        CSRF::assertValid();
+
+        $gymName = Request::post('gym_name');
+        $ownerName = Request::post('owner_name');
+        $ownerPhone = Request::post('owner_phone');
+        $gymAddress = Request::post('gym_address');
+        $upiId = Request::post('upi_id');
+
+        if (!$gymName) {
+            Response::error('Gym name is required');
+        }
+
+        $db = Database::getInstance();
+        $userId = Auth::user()['id'];
+
+        $db->execute(
+            "INSERT INTO gyms (user_id, gym_name, owner_name, owner_phone, gym_address, upi_id) VALUES (?, ?, ?, ?, ?, ?)",
+            [$userId, $gymName, $ownerName, $ownerPhone, $gymAddress, $upiId]
+        );
+
+        $gymId = $db->lastInsertId();
+
+        // Create default settings
+        $db->execute("INSERT INTO gym_settings (gym_id) VALUES (?)", [$gymId]);
+
+        // Seed default services
+        $defaultServices = [
+            ['Weight Training', 1500],
+            ['Cardio', 1000],
+            ['Zumba', 800],
+        ];
+        foreach ($defaultServices as [$name, $price]) {
+            $db->execute(
+                "INSERT INTO gym_services (gym_id, name, price) VALUES (?, ?, ?)",
+                [$gymId, $name, $price]
+            );
+        }
+
+        // Update session with gym info
+        Auth::login(
+            (int)$userId,
+            'owner',
+            (int)$gymId,
+            $gymName
+        );
+
+        Response::redirect('/dashboard');
+    }
+}
+
+
+--------------------------------------------------------------------------------
+FILE: /workspaces/gym-manager/php gym manager/controllers/ExportController.php
+--------------------------------------------------------------------------------
+<?php
+class ExportController {
+    public function members(): void {
+        Auth::guard('owner');
+        $gymId = Auth::gymId();
+        
+        $db = Database::getInstance();
+        $members = $db->fetchAll(
+            "SELECT member_name, phone_number, member_email, service_name, monthly_fee, pending_due, start_date, expiry_date, joined_date, status, last_renewed_at 
+             FROM members WHERE gym_id = ? ORDER BY member_name ASC", 
+            [$gymId]
+        );
+
+        header('Content-Type: text/csv; charset=utf-8');
+        header('Content-Disposition: attachment; filename="members_' . date('Y-m-d') . '.csv"');
+
+        $out = fopen('php://output', 'w');
+        fprintf($out, chr(0xEF).chr(0xBB).chr(0xBF)); // UTF-8 BOM for Excel
+
+        fputcsv($out, [
+            'Name', 'Phone', 'Email', 'Service', 'Monthly Fee',
+            'Pending Due', 'Start Date', 'Expiry Date', 'Joined Date',
+            'Status', 'Last Renewed'
+        ]);
+
+        foreach ($members as $m) {
+            fputcsv($out, $m);
+        }
+        fclose($out);
+        exit;
+    }
+
+    public function payments(): void {
+        Auth::guard('owner');
+        $gymId = Auth::gymId();
+
+        $db = Database::getInstance();
+        $payments = $db->fetchAll(
+            "SELECT p.payment_date, m.member_name, m.phone_number, m.service_name, p.amount_paid, p.note 
+             FROM payments p 
+             JOIN members m ON p.member_id = m.id 
+             WHERE p.gym_id = ? 
+             ORDER BY p.payment_date DESC", 
+            [$gymId]
+        );
+
+        header('Content-Type: text/csv; charset=utf-8');
+        header('Content-Disposition: attachment; filename="payments_' . date('Y-m-d') . '.csv"');
+
+        $out = fopen('php://output', 'w');
+        fprintf($out, chr(0xEF).chr(0xBB).chr(0xBF)); // UTF-8 BOM for Excel
+
+        fputcsv($out, ['Date', 'Member Name', 'Phone', 'Service', 'Amount Paid', 'Note']);
+
+        foreach ($payments as $p) {
+            fputcsv($out, $p);
+        }
+        fclose($out);
+        exit;
+    }
+}
+
+
+--------------------------------------------------------------------------------
+FILE: /workspaces/gym-manager/php gym manager/controllers/DashboardController.php
+--------------------------------------------------------------------------------
+<?php
+class DashboardController {
+    public function index(): void {
+        Auth::guard('owner');
+        
+        $userId = Auth::user()['id'];
+        $db = Database::getInstance();
+        
+        // Check if gym exists
+        $gym = $db->fetch("SELECT * FROM gyms WHERE user_id = ?", [$userId]);
+        if (!$gym) {
+            Response::redirect('/setup');
+        }
+        
+        $gymId = (int)$gym['id'];
+        
+        // Run auto-dead update only on dashboard load
+        (new MemberModel())->runAutoDeadUpdate($gymId);
+        
+        // Calculate trial days for the view
+
+        $trialStart = $gym['trial_start_date'];
+        $daysUsed = (int)( (strtotime(date('Y-m-d')) - strtotime($trialStart)) / 86400 );
+        
+        // Load Data
+        $memberModel = new MemberModel();
+        $paymentModel = new PaymentModel();
+        
+        $stats = $memberModel->countsByStatus($gymId);
+        $monthlyCollection = $paymentModel->getMonthlyTotal($gymId);
+        $services = $db->fetchAll("SELECT * FROM gym_services WHERE gym_id = ? AND is_active = 1", [$gymId]);
+        $settings = $db->fetch("SELECT * FROM gym_settings WHERE gym_id = ?", [$gymId]);
+
+        require_once __DIR__ . '/../views/dashboard/index.php';
+    }
+
+    public function showPaywall(): void {
+        $userId = Auth::user()['id'] ?? 0;
+        $db = Database::getInstance();
+        $gym = $db->fetch("SELECT * FROM gyms WHERE user_id = ?", [$userId]);
+        
+        require_once __DIR__ . '/../views/paywall/index.php';
+    }
+}
+
+
+--------------------------------------------------------------------------------
+FILE: /workspaces/gym-manager/php gym manager/controllers/AuthController.php
+--------------------------------------------------------------------------------
+<?php
+class AuthController {
+    public function showLogin(): void {
+        require_once __DIR__ . '/../views/auth/login.php';
+    }
+
+    public function login(): void {
+        CSRF::assertValid();
+        $email = Request::post('email');
+        $password = Request::post('password');
+
+        if (!$email || !$password) {
+            Response::error('Email and password are required');
+        }
+
+        $db = Database::getInstance();
+        $user = $db->fetch("SELECT * FROM users WHERE email = ?", [$email]);
+
+        if (!$user || !password_verify($password, $user['password'])) {
+            Response::error('Invalid email or password');
+        }
+
+        // Get gym if it exists
+        $gym = $db->fetch("SELECT * FROM gyms WHERE user_id = ?", [$user['id']]);
+        
+        Auth::login(
+            (int)$user['id'],
+            $user['role'],
+            $gym ? (int)$gym['id'] : null,
+            $gym ? $gym['gym_name'] : '',
+            $gym ? $gym['trial_start_date'] : null
+        );
+
+
+        Response::redirect('/dashboard');
+    }
+
+    public function logout(): void {
+        CSRF::assertValid();
+        Auth::logout();
+        Response::redirect('/login');
+    }
+
+    public function showRegister(): void {
+        require_once __DIR__ . '/../views/auth/register.php';
+    }
+
+    public function register(): void {
+        CSRF::assertValid();
+        $email = Request::post('email');
+        $password = Request::post('password');
+
+        if (!$email || !$password) {
+            Response::error('Email and password are required');
+        }
+
+        $db = Database::getInstance();
+        if ($db->fetch("SELECT 1 FROM users WHERE email = ?", [$email])) {
+            Response::error('Email already registered');
+        }
+
+        $hashedPassword = password_hash($password, PASSWORD_BCRYPT);
+        $db->execute(
+            "INSERT INTO users (email, password, role) VALUES (?, ?, 'owner')",
+            [$email, $hashedPassword]
+        );
+
+        Response::redirect('/login');
+    }
+}
+
+
+--------------------------------------------------------------------------------
+FILE: /workspaces/gym-manager/php gym manager/controllers/MemberController.php
+--------------------------------------------------------------------------------
+<?php
+class MemberController {
+    private MemberModel $memberModel;
+
+    public function __construct() {
+        $this->memberModel = new MemberModel();
+    }
+
+    public function list(): void {
+        Auth::guard('owner');
+        $gymId = Auth::gymId();
+        $tab = Request::get('tab', 'all');
+        $search = Request::get('search', '');
+
+        $members = $this->memberModel->getAllByGym($gymId, $tab, $search);
+        
+        // Attach WhatsApp links
+        $db = Database::getInstance();
+        $settings = $db->fetch("SELECT * FROM gym_settings WHERE gym_id = ?", [$gymId]);
+        $gym = $db->fetch("SELECT gym_name FROM gyms WHERE id = ?", [$gymId]);
+        $gymName = $gym['gym_name'] ?? '';
+
+        foreach ($members as &$m) {
+            $m['whatsapp_link'] = buildWhatsappLink($m, $settings, $gymName);
+        }
+
+        Response::success(['members' => $members]);
+    }
+
+    public function add(): void {
+        Auth::guard('owner');
+        CSRF::assertValid();
+
+        $data = Request::json() ?? $_POST;
+        if (!$data || !is_array($data)) {
+            Response::error('Invalid request data');
+        }
+        $gymId = Auth::gymId();
+
+
+        $name = Request::sanitize($data['member_name'] ?? '');
+        $phone = preg_replace('/\D/', '', $data['phone_number'] ?? '');
+        $serviceId = (int)($data['service_id'] ?? 0);
+        $fee = (float)($data['monthly_fee'] ?? 0);
+        $paid = (float)($data['amount_paid'] ?? 0);
+        $startDate = $data['start_date'] ?? date('Y-m-d');
+
+        if (!$name || strlen($phone) !== 10) {
+            Response::error('Valid name and 10-digit phone are required');
+        }
+
+        // Check duplicate
+        $existing = $this->memberModel->findByPhone($phone, $gymId);
+        if ($existing) {
+            if ($existing['status'] === 'dead') {
+                Response::success([
+                    'duplicate' => true,
+                    'canRejoin' => true,
+                    'memberId' => $existing['id'],
+                    'name' => $existing['member_name']
+                ]);
+            }
+            Response::error('Member with this phone already exists');
+        }
+
+        // Fetch service name
+        $db = Database::getInstance();
+        $service = $db->fetch("SELECT name FROM gym_services WHERE id = ? AND gym_id = ?", [$serviceId, $gymId]);
+        if (!$service) {
+            Response::error('Invalid service selected');
+        }
+
+        $expiryDate = date('Y-m-d', strtotime($startDate . ' + 30 days'));
+        $pendingDue = max(0, $fee - $paid);
+
+        $memberId = $this->memberModel->add([
+            'gym_id' => $gymId,
+            'member_name' => $name,
+            'phone_number' => $phone,
+            'service_id' => $serviceId,
+            'service_name' => $service['name'],
+            'monthly_fee' => $fee,
+            'pending_due' => $pendingDue,
+            'start_date' => $startDate,
+            'expiry_date' => $expiryDate,
+            'status' => 'active'
+        ]);
+
+        // Log first payment
+        if ($paid > 0) {
+            $db->execute(
+                "INSERT INTO payments (gym_id, member_id, amount_paid, payment_date, note) VALUES (?, ?, ?, date('now'), 'first_payment')",
+                [$gymId, $memberId, $paid]
+            );
+        }
+
+        // Log history
+        $db->execute(
+            "INSERT INTO member_history (gym_id, member_id, event_type, event_date) VALUES (?, ?, 'joined', date('now'))",
+            [$gymId, $memberId]
+        );
+
+        Response::success(['memberId' => $memberId, 'message' => 'Member added successfully']);
+    }
+
+    public function edit(): void {
+        Auth::guard('owner');
+        CSRF::assertValid();
+
+        $id = (int)Request::post('id');
+        $gymId = Auth::gymId();
+        $data = Request::json() ?? $_POST;
+        
+        if (!$data || !is_array($data)) {
+            Response::error('No data provided for update');
+        }
+
+        unset($data['id']);
+        $sanitizedData = [];
+        foreach ($data as $k => $v) {
+            $sanitizedData[$k] = Request::sanitize($v);
+        }
+
+        if (empty($sanitizedData)) {
+            Response::error('No fields to update');
+        }
+
+        if ($this->memberModel->edit($id, $gymId, $sanitizedData)) {
+            // Log the edit in history
+            $db = Database::getInstance();
+            $db->execute(
+                "INSERT INTO member_history (gym_id, member_id, event_type, event_date, details) VALUES (?, ?, 'edited', date('now'), ?)",
+                [$gymId, $id, json_encode($sanitizedData)]
+            );
+            Response::success(['message' => 'Member updated']);
+        } else {
+            Response::error('Update failed');
+        }
+    }
+
+    public function renew(): void {
+        Auth::guard('owner');
+        CSRF::assertValid();
+
+        $id = (int)Request::post('id');
+        $gymId = Auth::gymId();
+        $months = (int)(Request::post('months') ?? 1);
+        $amountPaid = (float)(Request::post('amount_paid') ?? 0);
+
+        $db = Database::getInstance();
+        $member = $db->fetch("SELECT * FROM members WHERE id = ? AND gym_id = ?", [$id, $gymId]);
+        if (!$member) Response::error('Member not found');
+
+        $feeForPeriod = $member['monthly_fee'] * $months;
+        $newDue = max(0, ($member['pending_due'] ?? 0) + $feeForPeriod - $amountPaid);
+
+        try {
+            $db->beginTransaction();
+            
+            if (!$this->memberModel->renew($id, $gymId, $months)) {
+                throw new Exception('Member renewal update failed');
+            }
+
+            $db->execute(
+                "UPDATE members SET pending_due = ? WHERE id = ? AND gym_id = ?",
+                [$newDue, $id, $gymId]
+            );
+
+            if ($amountPaid > 0) {
+                $db->execute(
+                    "INSERT INTO payments (gym_id, member_id, amount_paid, payment_date, note) VALUES (?, ?, ?, date('now'), 'renewal')",
+                    [$gymId, $id, $amountPaid]
+                );
+            }
+
+            $db->execute(
+                "INSERT INTO member_history (gym_id, member_id, event_type, event_date) VALUES (?, ?, 'renewed', date('now'))",
+                [$gymId, $id]
+            );
+
+            $db->commit();
+            Response::success(['message' => 'Member renewed', 'new_due' => $newDue]);
+        } catch (Exception $e) {
+            $db->rollBack();
+            Response::error('Renewal failed: ' . $e->getMessage());
+        }
+    }
+
+    public function clearDue(): void {
+        Auth::guard('owner');
+        CSRF::assertValid();
+
+        $id = (int)Request::post('id');
+        $gymId = Auth::gymId();
+        $amount = (float)Request::post('amount');
+
+        if ($amount <= 0) {
+            Response::error('Invalid amount');
+        }
+
+        $db = Database::getInstance();
+        $member = $db->fetch("SELECT * FROM members WHERE id = ? AND gym_id = ?", [$id, $gymId]);
+        if (!$member) Response::error('Member not found');
+
+        $newDue = max(0, $member['pending_due'] - $amount);
+
+        $db->execute(
+            "UPDATE members SET pending_due = ?, updated_at = datetime('now') WHERE id = ? AND gym_id = ?",
+            [$newDue, $id, $gymId]
+        );
+
+        $db->execute(
+            "INSERT INTO payments (gym_id, member_id, amount_paid, payment_date, note) VALUES (?, ?, ?, date('now'), 'clear_due')",
+            [$gymId, $id, $amount]
+        );
+
+        Response::success(['message' => 'Due cleared successfully']);
+    }
+
+    public function markDead(): void {
+        Auth::guard('owner');
+        CSRF::assertValid();
+
+        $id = (int)Request::post('id');
+        $gymId = Auth::gymId();
+
+        if ($this->memberModel->markDead($id, $gymId)) {
+            $db = Database::getInstance();
+            $db->execute(
+                "INSERT INTO member_history (gym_id, member_id, event_type, event_date) VALUES (?, ?, 'marked_dead', date('now'))",
+                [$gymId, $id]
+            );
+            Response::success(['message' => 'Member marked as dead']);
+        } else {
+            Response::error('Operation failed');
+        }
+    }
+
+    public function rejoin(): void {
+        Auth::guard('owner');
+        CSRF::assertValid();
+
+        $id = (int)Request::post('id');
+        $gymId = Auth::gymId();
+        $data = Request::json() ?? $_POST;
+
+        $startDate = $data['start_date'] ?? date('Y-m-d');
+        $expiryDate = date('Y-m-d', strtotime($startDate . ' + 30 days'));
+        
+        $rejoinData = [
+            'start_date' => $startDate,
+            'expiry_date' => $expiryDate,
+            'service_id' => (int)($data['service_id'] ?? 0),
+            'service_name' => Request::sanitize($data['service_name'] ?? ''),
+            'monthly_fee' => (float)($data['monthly_fee'] ?? 0),
+        ];
+
+        $db = Database::getInstance();
+        try {
+            $db->beginTransaction();
+
+            // Explicitly reset pending_due to 0 and update member
+            if (!$this->memberModel->rejoin($id, $gymId, $rejoinData)) {
+                throw new Exception('Rejoin update failed');
+            }
+            
+            // MemberModel::rejoin already sets pending_due=0 but let's be extra sure and log it
+            $db->execute(
+                "UPDATE members SET pending_due = 0 WHERE id = ? AND gym_id = ?",
+                [$id, $gymId]
+            );
+
+            $db->execute(
+                "INSERT INTO member_history (gym_id, member_id, event_type, event_date) VALUES (?, ?, 'rejoined', date('now'))",
+                [$gymId, $id]
+            );
+
+            $db->commit();
+            Response::success(['message' => 'Member rejoined']);
+        } catch (Exception $e) {
+            $db->rollBack();
+            Response::error('Rejoin failed: ' . $e->getMessage());
+        }
+    }
+
+    public function checkDuplicate(): void {
+        Auth::guard('owner');
+        $phone = preg_replace('/\D/', '', Request::get('phone', ''));
+        $gymId = Auth::gymId();
+
+        $member = $this->memberModel->findByPhone($phone, $gymId);
+        if ($member) {
+            Response::success([
+                'found' => true,
+                'status' => $member['status'],
+                'name' => $member['member_name'],
+                'canRejoin' => ($member['status'] === 'dead')
+            ]);
+        }
+        Response::success(['found' => false]);
+    }
+}
+
+
+--------------------------------------------------------------------------------
+FILE: /workspaces/gym-manager/php gym manager/controllers/AnalyticsController.php
+--------------------------------------------------------------------------------
+<?php
+class AnalyticsController {
+    private AnalyticsModel $analyticsModel;
+
+    public function __construct() {
+        $this->analyticsModel = new AnalyticsModel();
+    }
+
+    public function getData(): void {
+        Auth::guard('owner');
+        $gymId = Auth::gymId();
+
+        Response::success([
+            'stats' => $this->analyticsModel->getStats($gymId),
+            'monthly_collections' => $this->analyticsModel->getMonthlyCollections($gymId),
+            'member_count_trend' => $this->analyticsModel->getMemberCountTrend($gymId),
+            'service_breakdown' => $this->analyticsModel->getServiceBreakdown($gymId),
+        ]);
+    }
+
+    public function showPage(): void {
+        Auth::guard('owner');
+        require_once __DIR__ . '/../views/analytics/index.php';
+    }
+}
+
+
+--------------------------------------------------------------------------------
+FILE: /workspaces/gym-manager/php gym manager/controllers/ServiceController.php
+--------------------------------------------------------------------------------
+<?php
+class ServiceController {
+    private ServiceModel $serviceModel;
+
+    public function __construct() {
+        $this->serviceModel = new ServiceModel();
+    }
+
+    public function list(): void {
+        Auth::guard('owner');
+        Response::success(['services' => $this->serviceModel->getActive(Auth::gymId())]);
+    }
+
+    public function add(): void {
+        Auth::guard('owner');
+        CSRF::assertValid();
+        $data = Request::json() ?? $_POST;
+        $name = Request::sanitize($data['name'] ?? '');
+        $price = (float)($data['price'] ?? 0);
+
+        if (!$name) Response::error('Name is required');
+
+        $id = $this->serviceModel->add(['gym_id' => Auth::gymId(), 'name' => $name, 'price' => $price]);
+        Response::success(['id' => $id, 'message' => 'Service added']);
+    }
+
+    public function edit(): void {
+        Auth::guard('owner');
+        CSRF::assertValid();
+        $data = Request::json() ?? $_POST;
+        $id = (int)$data['id'];
+        $name = Request::sanitize($data['name'] ?? '');
+        $price = (float)($data['price'] ?? 0);
+
+        if ($this->serviceModel->edit($id, Auth::gymId(), ['name' => $name, 'price' => $price])) {
+            Response::success(['message' => 'Service updated']);
+        } else {
+            Response::error('Update failed');
+        }
+    }
+
+    public function delete(): void {
+        Auth::guard('owner');
+        CSRF::assertValid();
+        $id = (int)Request::post('id');
+        
+        // Check if active members use this
+        $db = Database::getInstance();
+        $count = $db->fetch("SELECT COUNT(*) as c FROM members WHERE service_id = ? AND gym_id = ? AND status = 'active'", [$id, Auth::gymId()])['c'];
+        if ($count > 0) {
+            Response::error("Cannot delete - $count active members use this service");
+        }
+
+        if ($this->serviceModel->delete($id, Auth::gymId())) {
+            Response::success(['message' => 'Service deleted']);
+        } else {
+            Response::error('Delete failed');
+        }
+    }
+}
+
+
+--------------------------------------------------------------------------------
+FILE: /workspaces/gym-manager/php gym manager/favicon.ico
+--------------------------------------------------------------------------------
+
+
+--------------------------------------------------------------------------------
+FILE: /workspaces/gym-manager/php gym manager/api/members.php
+--------------------------------------------------------------------------------
+<?php
+// This is a helper file for the router.
+// Since we use match() in index.php, we don't need separate API files 
+// as long as the router handles the endpoints.
+// However, the PRD mentioned api/members.php, etc.
+// I will keep the routing in index.php for simplicity as it's the modern way.
+// I'll just create the file to satisfy the folder structure.
+
+
+--------------------------------------------------------------------------------
+FILE: /workspaces/gym-manager/php gym manager/api/paywall.php
+--------------------------------------------------------------------------------
+<?php
+// Add this route to index.php as well
+// $uri === '/paywall' => (new DashboardController)->showPaywall(),
+
+
+--------------------------------------------------------------------------------
+FILE: /workspaces/gym-manager/php gym manager/scripts/deploy_check.php
+--------------------------------------------------------------------------------
+<?php
+require_once __DIR__ . '/../config/app.php';
+require_once __DIR__ . '/../config/db.php';
+require_once __DIR__ . '/../core/Database.php';
+
+$errors = [];
+
+echo "Running Pre-Deployment Check...\n";
+
+// 1. Check .env exists
+if (!file_exists(__DIR__ . '/../.env')) $errors[] = '.env file missing';
+
+// 2. Check DB connects
+try { 
+    $db = getDB(); 
+    echo "✅ DB connected\n"; 
+} catch (Exception $e) { 
+    $errors[] = 'DB connection failed: ' . $e->getMessage(); 
+}
+
+// 3. Check all tables exist
+if (isset($db)) {
+    $tables = ['users','gyms','members','payments','gym_services','gym_settings','member_history'];
+    foreach ($tables as $t) {
+        try { 
+            $db->query("SELECT 1 FROM $t LIMIT 1"); 
+            echo "✅ Table: $t\n"; 
+        } catch (Exception $e) { 
+            $errors[] = "Missing table: $t"; 
+        }
+    }
+}
+
+// 4. Check APP_SECRET is not default
+if (($_ENV['APP_SECRET'] ?? '') === 'CHANGE_THIS') {
+    $errors[] = 'APP_SECRET not changed from default';
+}
+
+if (count($errors) > 0) {
+    echo "\n❌ DEPLOYMENT BLOCKED:\n";
+    foreach ($errors as $e) echo "  - $e\n";
+    exit(1);
+}
+
+echo "\n✅ All checks passed. Safe to deploy.\n";
+
+
+--------------------------------------------------------------------------------
+FILE: /workspaces/gym-manager/php gym manager/scripts/start.sh
+--------------------------------------------------------------------------------
+#!/bin/bash
+echo "🚀 Starting Gym Manager Server..."
+cd "$(dirname "$0")/.."
+php -S 0.0.0.0:8000 index.php
+
+
+--------------------------------------------------------------------------------
+FILE: /workspaces/gym-manager/php gym manager/scripts/setup.sh
+--------------------------------------------------------------------------------
+#!/bin/bash
+echo "Setting up Gym Manager..."
+
+# Ensure we are in the project root
+cd "$(dirname "$0")/.."
+
+cp .env.example .env
+echo "✅ .env created"
+
+mkdir -p db assets/css assets/js
+echo "✅ Directories created"
+
+php db/migrate.php
+echo "✅ Database migrated"
+
+php db/seed.php
+echo "✅ Test data seeded"
+
+echo "------------------------------------------------"
+echo "🚀 Setup complete! Run the app with:"
+echo "php -S 0.0.0.0:8000 -t . index.php"
+echo "------------------------------------------------"
+
+
+--------------------------------------------------------------------------------
+FILE: /workspaces/gym-manager/php gym manager/assets/css/app.css
+--------------------------------------------------------------------------------
+body { 
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; 
+    background: #f9fafb; 
+    color: #111827; 
+    margin: 0; 
+}
+.page-shell { 
+    max-width: 600px; 
+    margin: 0 auto; 
+    padding: 16px; 
+}
+.card { 
+    background: #fff; 
+    border-radius: 20px; 
+    padding: 20px; 
+    margin-bottom: 16px; 
+    box-shadow: 0 4px 16px rgba(0,0,0,.06); 
+}
+.btn { 
+    border: none; 
+    border-radius: 12px; 
+    padding: 10px 16px; 
+    cursor: pointer; 
+    font-weight: 600; 
+    font-size: 0.85rem; 
+    transition: opacity 0.2s; 
+}
+.btn:hover { opacity: 0.9; }
+.btn-primary { 
+    background: #111827; 
+    color: #fff; 
+    width: 100%; 
+    padding: 14px; 
+    font-size: 1rem; 
+}
+.btn-danger { background: #dc2626; color: #fff; }
+.btn-wa { background: #25D366; color: #fff; padding: 10px; border-radius: 12px; display: flex; align-items: center; }
+.btn-renew { background: #2563eb; color: #fff; }
+.btn-dead { background: #6b7280; color: #fff; }
+.btn-rejoin { background: #7c3aed; color: #fff; }
+.btn-edit { background: #f59e0b; color: #fff; }
+
+.form-row { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+.form-row-3 { grid-template-columns: 1fr 1fr 1fr; }
+input, select, textarea { 
+    width: 100%; 
+    padding: 13px; 
+    border: 1px solid #e5e7eb; 
+    border-radius: 12px; 
+    font-size: 1rem; 
+    box-sizing: border-box; 
+}
+label { display: block; margin-bottom: 6px; font-size: 0.85rem; font-weight: 600; color: #4b5563; }
+
+.cash-header { 
+    background: #dcfce7; 
+    color: #166534; 
+    text-align: center; 
+    padding: 20px; 
+    border-radius: 16px; 
+}
+
+.tab-group { 
+    display: flex; 
+    background: #f3f4f6; 
+    border-radius: 14px; 
+    padding: 4px; 
+    gap: 4px; 
+}
+.tab-btn { 
+    flex: 1; 
+    padding: 10px 4px; 
+    border-radius: 10px; 
+    background: transparent; 
+    color: #666; 
+    font-size: 0.8rem; 
+    font-weight: 600; 
+    border: none; 
+    cursor: pointer; 
+}
+.tab-btn.active { 
+    background: #fff; 
+    color: #111; 
+    box-shadow: 0 2px 8px rgba(0,0,0,.1); 
+}
+.tab-count { 
+    font-size: 0.75rem; 
+    background: #e5e7eb; 
+    border-radius: 99px; 
+    padding: 1px 6px; 
+    margin-left: 4px; 
+}
+.tab-btn.active .tab-count.overdue-count { background: #fee2e2; color: #b91c1c; }
+
+.member-card { 
+    border: 1px solid #e5e7eb; 
+    border-radius: 14px; 
+    padding: 14px; 
+    margin-bottom: 10px; 
+}
+.member-card-top { 
+    display: flex; 
+    justify-content: space-between; 
+    align-items: flex-start; 
+    margin-bottom: 8px; 
+}
+.member-name { font-weight: 700; font-size: 1rem; }
+.service-tag { 
+    font-size: 0.68rem; 
+    background: #f3f4f6; 
+    padding: 2px 8px; 
+    border-radius: 99px; 
+    color: #6b7280; 
+    text-transform: uppercase; 
+}
+.status-badge { 
+    font-size: 0.7rem; 
+    font-weight: 700; 
+    padding: 2px 8px; 
+    border-radius: 99px; 
+}
+.badge-active { background: #dcfce7; color: #166534; }
+.badge-overdue { background: #fee2e2; color: #b91c1c; }
+.badge-dead { background: #f3f4f6; color: #6b7280; }
+.badge-rejoined { background: #dbeafe; color: #1e40af; }
+.member-card-bottom { 
+    display: flex; 
+    justify-content: space-between; 
+    align-items: center; 
+}
+.problem-text { color: #dc2626; font-weight: 700; font-size: 0.85rem; }
+.action-zone { display: flex; gap: 6px; align-items: center; }
+.udhaar-badge { 
+    background: #fee2e2; 
+    color: #b91c1c; 
+    padding: 3px 8px; 
+    border-radius: 8px; 
+    font-weight: 700; 
+    font-size: 0.85rem; 
+}
+
+.search-bar { 
+    width: 100%; 
+    padding: 13px 16px; 
+    border: 1px solid #e5e7eb; 
+    border-radius: 12px; 
+    margin-bottom: 14px; 
+    font-size: 0.95rem; 
+}
+
+.toast { 
+    position: fixed; 
+    bottom: 24px; 
+    left: 50%; 
+    transform: translateX(-50%); 
+    background: #111827; 
+    color: #fff; 
+    padding: 12px 24px; 
+    border-radius: 99px; 
+    opacity: 0; 
+    transition: opacity 0.3s; 
+    z-index: 999; 
+    pointer-events: none; 
+    white-space: nowrap; 
+}
+.toast.show { opacity: 1; }
+.toast.toast-error { background: #dc2626; }
+.toast.toast-warning { background: #f59e0b; color: #111; }
+
+.offline-banner { 
+    background: #fef3c7; 
+    color: #92400e; 
+    text-align: center; 
+    padding: 10px; 
+    font-size: 0.85rem; 
+    font-weight: 600; 
+}
+
+.lockout-overlay { 
+    position: fixed; 
+    inset: 0; 
+    background: rgba(0,0,0,.5); 
+    display: flex; 
+    align-items: center; 
+    justify-content: center; 
+    z-index: 100; 
+}
+.lockout-card { 
+    background: #fff; 
+    border-radius: 24px; 
+    padding: 32px; 
+    max-width: 420px; 
+    width: 100%; 
+    text-align: center; 
+}
+.upi-box { 
+    background: #f3f4f6; 
+    border: 1px dashed #d1d5db; 
+    border-radius: 14px; 
+    padding: 16px; 
+    margin: 16px 0; 
+}
+
+.stat-cards { 
+    display: grid; 
+    grid-template-columns: 1fr 1fr; 
+    gap: 10px; 
+    margin-bottom: 20px; 
+}
+.stat-card { 
+    background: #fff; 
+    border-radius: 14px; 
+    padding: 16px; 
+    text-align: center; 
+    border: 1px solid #e5e7eb; 
+}
+.stat-value { 
+    font-size: 2rem; 
+    font-weight: 800; 
+}
+.stat-label { 
+    font-size: 0.75rem; 
+    color: #6b7280; 
+    text-transform: uppercase; 
+}
+
+.portal-ring { 
+    display: flex; 
+    flex-direction: column; 
+    align-items: center; 
+    padding: 30px 0; 
+}
+.ring-label { 
+    font-size: 2.5rem; 
+    font-weight: 800; 
+}
+.ring-sub { 
+    font-size: 0.85rem; 
+    color: #6b7280; 
+}
+
+@media (max-width: 400px) {
+    .form-row { grid-template-columns: 1fr; }
+    .stat-cards { grid-template-columns: 1fr; }
+}
+
+
+--------------------------------------------------------------------------------
+FILE: /workspaces/gym-manager/php gym manager/assets/js/app.js
+--------------------------------------------------------------------------------
+// Global CSRF token helper
+function getCsrfToken() {
+    return document.querySelector('meta[name="csrf-token"]')?.content || '';
+}
+
+// Universal fetch wrapper
+async function apiFetch(url, options = {}) {
+    // FIX: Prefix all URLs with /index.php to make the short server command work
+    const routedUrl = url.startsWith('/') ? `/index.php${url}` : url;
+
+    const headers = {
+        'Content-Type': 'application/json',
+        'X-CSRF-Token': getCsrfToken(),
+        ...(options.headers || {})
+    };
+    
+    const res = await fetch(routedUrl, { ...options, headers });
+    if (!res.ok) {
+        const errData = await res.json().catch(() => ({}));
+        const error = new Error(errData.error || `HTTP ${res.status}`);
+        error.status = res.status;
+        throw error;
+    }
+    return res.json();
+}
+
+// Real connectivity check (doesn't trust navigator.onLine)
+async function checkActualConnectivity() {
+    if (!navigator.onLine) return false;
+    try {
+        // Fetch a tiny resource to verify actual internet access
+        // We use a cache-busting query to ensure we aren't seeing a cached 200
+        await fetch('/favicon.ico?t=' + Date.now(), { mode: 'no-cors', cache: 'no-store' });
+        return true;
+    } catch {
+        return false;
+    }
+}
+
+// Toast notification
+function showToast(message, type = 'success') {
+    const toast = document.getElementById('toast');
+    if (!toast) return;
+    toast.textContent = message;
+    toast.className = `toast toast-${type} show`;
+    setTimeout(() => toast.classList.remove('show'), 3500);
+}
+
+// Wrapper for adding member with offline support
+async function submitAddMember(formData) {
+    const isOnline = await checkActualConnectivity();
+
+    if (!isOnline) {
+        enqueueOffline(formData);
+        showToast('📴 No internet. Saved offline.', 'warning');
+        return { offline: true };
+    }
+
+    try {
+        const res = await apiFetch('/api/members', {
+            method: 'POST',
+            body: JSON.stringify(formData)
+        });
+        return res;
+    } catch (e) {
+        // Only queue offline if it's a real network failure (TypeError), not a server error (404, 500)
+        if (e instanceof TypeError || !e.status) {
+            enqueueOffline(formData);
+            showToast('📴 Connection lost. Saved offline.', 'warning');
+            return { offline: true };
+        }
+        // For server errors, throw the error so the UI can display the message
+        throw e;
+    }
+}
+
+
+--------------------------------------------------------------------------------
+FILE: /workspaces/gym-manager/php gym manager/assets/js/analytics.js
+--------------------------------------------------------------------------------
+async function loadAnalytics() {
+    try {
+        const data = await apiFetch('/api/analytics');
+        const { stats, monthly_collections, member_count_trend, service_breakdown } = data;
+
+        // Update Stat Cards
+        document.getElementById('stat-active').textContent = stats.total_active;
+        document.getElementById('stat-earnings').textContent = '₹' + stats.this_month_collection.toLocaleString();
+        document.getElementById('stat-joins').textContent = stats.new_joins_this_month;
+        document.getElementById('stat-renewals').textContent = stats.renewals_this_month;
+
+        // Revenue Chart
+        new Chart(document.getElementById('revenueChart'), {
+            type: 'bar',
+            data: {
+                labels: monthly_collections.map(d => d.month),
+                datasets: [{
+                    label: 'Collection (₹)',
+                    data: monthly_collections.map(d => d.total),
+                    backgroundColor: '#10b981'
+                }]
+            },
+            options: { responsive: true }
+        });
+
+        // Growth Chart
+        new Chart(document.getElementById('growthChart'), {
+            type: 'line',
+            data: {
+                labels: member_count_trend.map(d => d.month),
+                datasets: [{
+                    label: 'New Members',
+                    data: member_count_trend.map(d => d.count),
+                    borderColor: '#2563eb',
+                    fill: false
+                }]
+            },
+            options: { responsive: true }
+        });
+
+        // Service Chart
+        new Chart(document.getElementById('serviceChart'), {
+            type: 'doughnut',
+            data: {
+                labels: service_breakdown.map(d => d.service),
+                datasets: [{
+                    data: service_breakdown.map(d => d.count),
+                    backgroundColor: ['#10b981', '#3b82f6', '#f59e0b', '#ef4444', '#8b5cf6']
+                }]
+            },
+            options: { responsive: true }
+        });
+
+    } catch (e) {
+        showToast(e.message, 'error');
+    }
+}
+
+document.addEventListener('DOMContentLoaded', loadAnalytics);
+
+
+--------------------------------------------------------------------------------
+FILE: /workspaces/gym-manager/php gym manager/assets/js/dashboard.js
+--------------------------------------------------------------------------------
+let currentTab = 'running';
+let currentSearch = '';
+let searchTimeout = null;
+
+function escapeHTML(str) {
+    if (!str) return '';
+    const div = document.createElement('div');
+    div.textContent = str;
+    return div.innerHTML;
+}
+
+function setQuickDate(option, inputId = 'add-member-start-date') {
+    const input = document.getElementById(inputId);
+    if (!input) return;
+    
+    const today = new Date();
+    if (option === 'today') {
+        input.value = today.toISOString().slice(0, 10);
+    } else if (option === 'yesterday') {
+        today.setDate(today.getDate() - 1);
+        input.value = today.toISOString().slice(0, 10);
+    } else {
+        // 'custom' - just focus the input
+        input.focus();
+    }
+}
+
+async function loadMembers() {
+    const listEl = document.getElementById('member-list');
+    if (!listEl) return;
+    
+    listEl.innerHTML = '<div style="text-align:center; padding: 40px;">Loading members...</div>';
+
+    try {
+        const res = await apiFetch(`/api/members?tab=${currentTab}&search=${encodeURIComponent(currentSearch)}`);
+        const members = res.members;
+
+        if (members.length === 0) {
+            listEl.innerHTML = '<div class="card" style="text-align:center; color:#6b7280;">No members found.</div>';
+            return;
+        }
+
+        listEl.innerHTML = members.map(m => `
+            <div class="card member-card" data-id="${m.id}">
+                <div style="display:flex; justify-content:space-between; align-items:start; margin-bottom:10px;">
+                    <div>
+                        <strong style="font-size:1.1rem;">${escapeHTML(m.member_name)}</strong>
+                        <span class="service-tag" style="font-size:0.7rem; background:#f3f4f6; padding:2px 6px; border-radius:10px; color:#6b7280; margin-left:8px;">${escapeHTML(m.service_name)}</span>
+                    </div>
+                    <span class="status-badge ${m.status === 'active' ? 'badge-active' : (m.status === 'overdue' ? 'badge-overdue' : 'badge-dead')}">${escapeHTML(m.status).toUpperCase()}</span>
+                </div>
+                <div style="display:flex; justify-content:space-between; align-items:center; font-size:0.85rem;">
+                    <div>
+                        ${m.status === 'active' ? `Expires in ${calculateDaysLeft(m.expiry_date)} days` : (m.status === 'dead' ? 'Last active: ' + m.expiry_date : `Expired ${Math.abs(calculateDaysLeft(m.expiry_date))} days ago`)}
+                        ${m.pending_due > 0 ? `<div class="udhaar-badge" style="color:#b91c1c; font-weight:700; margin-top:4px;">Udhaar: ₹${m.pending_due}</div>` : ''}
+                    </div>
+                    <div class="action-zone" style="display:flex; gap:8px;">
+                        <a href="${m.whatsapp_link}" target="_blank" class="btn" style="background:#25D366; color:#fff; padding:6px 12px; text-decoration:none; border-radius:8px; font-size:0.75rem;">WhatsApp</a>
+                        ${m.status !== 'dead' ? `<button data-action="renew" class="btn" style="background:#2563eb; color:#fff; padding:6px 12px; border-radius:8px; font-size:0.75rem;">Renew</button>` : ''}
+                        ${m.pending_due > 0 ? `<button data-action="clear-due" class="btn" style="background:#f59e0b; color:#fff; padding:6px 12px; border-radius:8px; font-size:0.75rem;">Clear Due</button>` : ''}
+                        ${m.status !== 'dead' ? `<button data-action="mark-dead" class="btn" style="background:#6b7280; color:#fff; padding:6px 12px; border-radius:8px; font-size:0.75rem;">Dead</button>` : ''}
+                        ${m.status === 'dead' ? `<button data-action="rejoin" class="btn" style="background:#7c3aed; color:#fff; padding:6px 12px; border-radius:8px; font-size:0.75rem;">Rejoin</button>` : ''}
+                    </div>
+                </div>
+            </div>
+        `).join('');
+    } catch (e) {
+        showToast(e.message, 'error');
+    }
+}
+
+function calculateDaysLeft(dateStr) {
+    const diff = new Date(dateStr) - new Date();
+    return Math.ceil(diff / (1000 * 60 * 60 * 24));
+}
+
+async function handleMemberAction(action, id, memberData = null) {
+    try {
+        if (action === 'renew') {
+            if (!confirm('Renew membership for 30 days?')) return;
+            await apiFetch('/api/members/renew', { method: 'POST', body: JSON.stringify({ id }) });
+            showToast('Member renewed!');
+        } else if (action === 'clear-due') {
+            openClearDueModal(memberData);
+        } else if (action === 'mark-dead') {
+            if (!confirm('Mark member as dead?')) return;
+            await apiFetch('/api/members/mark-dead', { method: 'POST', body: JSON.stringify({ id }) });
+            showToast('Marked as dead');
+        } else if (action === 'rejoin') {
+            openRejoinModal(memberData);
+        }
+        loadMembers();
+    } catch (e) { showToast(e.message, 'error'); }
+}
+
+// --- Modal Handlers ---
+
+function openAddMemberModal() {
+    document.getElementById('add-member-modal').style.display = 'flex';
+}
+
+function closeAddMemberModal() {
+    document.getElementById('add-member-modal').style.display = 'none';
+}
+
+function openClearDueModal(member) {
+    const modal = document.getElementById('clear-due-modal');
+    document.getElementById('clear-due-member-name').textContent = member.member_name;
+    document.getElementById('clear-due-total').textContent = '₹' + member.pending_due;
+    document.getElementById('clear-due-id').value = member.id;
+    document.getElementById('clear-due-amount').value = member.pending_due;
+    modal.style.display = 'flex';
+}
+
+function closeClearDueModal() {
+    document.getElementById('clear-due-modal').style.display = 'none';
+}
+
+function openRejoinModal(member) {
+    const modal = document.getElementById('rejoin-modal');
+    document.getElementById('rejoin-member-name').textContent = member.member_name;
+    document.getElementById('rejoin-id').value = member.id;
+    document.getElementById('rejoin-service-name').value = member.service_name;
+    document.getElementById('rejoin-monthly-fee').value = member.monthly_fee;
+    modal.style.display = 'flex';
+}
+
+function closeRejoinModal() {
+    document.getElementById('rejoin-modal').style.display = 'none';
+}
+
+document.addEventListener('DOMContentLoaded', () => {
+    loadMembers();
+
+    // Event Delegation for member actions
+    document.getElementById('member-list')?.addEventListener('click', (e) => {
+        const btn = e.target.closest('button[data-action]');
+        if (!btn) return;
+        
+        const action = btn.dataset.action;
+        const card = btn.closest('.member-card');
+        const id = card.dataset.id;
+        
+        // Extract member data from the DOM to pass to modals
+        // In a real app, we might fetch the member object, but here we can scrape the card
+        const memberData = {
+            id: id,
+            member_name: card.querySelector('strong').textContent,
+            pending_due: card.querySelector('.udhaar-badge')?.textContent.replace('Udhaar: ₹', '') || 0,
+            service_name: card.querySelector('.service-tag').textContent,
+            monthly_fee: 1500 // Default or fetched
+        };
+        
+        handleMemberAction(action, id, memberData);
+    });
+
+    // Debounced Search
+    document.getElementById('member-search')?.addEventListener('input', (e) => {
+        currentSearch = e.target.value;
+        clearTimeout(searchTimeout);
+        searchTimeout = setTimeout(loadMembers, 300);
+    });
+
+    // Tab Switching
+    document.querySelectorAll('.tab-btn').forEach(btn => {
+        btn.addEventListener('click', () => {
+            document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+            btn.classList.add('active');
+            currentTab = btn.dataset.tab;
+            loadMembers();
+        });
+    });
+
+    // Add Member Form
+    document.getElementById('add-member-form')?.addEventListener('submit', async (e) => {
+        e.preventDefault();
+        const formData = new FormData(e.target);
+        const data = Object.fromEntries(formData.entries());
+        
+        try {
+            const res = await submitAddMember(data);
+            if (res.offline) {
+                closeAddMemberModal();
+            } else if (res.success) {
+                showToast(res.message);
+                closeAddMemberModal();
+                loadMembers();
+            } else if (res.duplicate && res.canRejoin) {
+                showToast(`Member ${escapeHTML(res.name)} can rejoin. Please use Rejoin button.`, 'warning');
+            } else {
+                showToast(res.error || 'Unknown error', 'error');
+            }
+        } catch (e) { 
+            showToast(e.message, 'error'); 
+        }
+    });
+
+    // Clear Due Form
+    document.getElementById('clear-due-form')?.addEventListener('submit', async (e) => {
+        e.preventDefault();
+        const formData = new FormData(e.target);
+        const data = Object.fromEntries(formData.entries());
+        
+        try {
+            await apiFetch('/api/members/clear-due', {
+                method: 'POST',
+                body: JSON.stringify(data)
+            });
+            showToast('Due cleared successfully!');
+            closeClearDueModal();
+            loadMembers();
+        } catch (e) { showToast(e.message, 'error'); }
+    });
+
+    // Rejoin Form
+    document.getElementById('rejoin-form')?.addEventListener('submit', async (e) => {
+        e.preventDefault();
+        const formData = new FormData(e.target);
+        const data = Object.fromEntries(formData.entries());
+        
+        try {
+            await apiFetch('/api/members/rejoin', {
+                method: 'POST',
+                body: JSON.stringify(data)
+            });
+            showToast('Member rejoined successfully!');
+            closeRejoinModal();
+            loadMembers();
+        } catch (e) { showToast(e.message, 'error'); }
+    });
+
+    // Clear All button in Clear Due modal
+    document.getElementById('btn-clear-all')?.addEventListener('click', () => {
+        const total = document.getElementById('clear-due-total').textContent.replace('₹', '');
+        document.getElementById('clear-due-amount').value = total;
+    });
+
+    // Service dropdown update in Rejoin modal
+    document.getElementById('rejoin-service-id')?.addEventListener('change', async (e) => {
+        const serviceId = e.target.value;
+        try {
+            const res = await apiFetch('/api/services', { method: 'GET' });
+            const service = res.services.find(s => s.id == serviceId);
+            if (service) {
+                document.getElementById('rejoin-service-name').value = service.name;
+                document.getElementById('rejoin-monthly-fee').value = service.price;
+            }
+        } catch (e) { console.error('Error updating service', e); }
+    });
+});
+
+
+--------------------------------------------------------------------------------
+FILE: /workspaces/gym-manager/php gym manager/assets/js/offline.js
+--------------------------------------------------------------------------------
+const OFFLINE_KEY = 'gym_offline_queue';
+
+function isOnline() { return navigator.onLine; }
+
+function enqueueOffline(memberData) {
+    const queue = JSON.parse(localStorage.getItem(OFFLINE_KEY) || '[]');
+    queue.push({ ...memberData, queued_at: new Date().toISOString() });
+    localStorage.setItem(OFFLINE_KEY, JSON.stringify(queue));
+    updateOfflineBanner();
+}
+
+function getOfflineQueue() {
+    return JSON.parse(localStorage.getItem(OFFLINE_KEY) || '[]');
+}
+
+function clearOfflineQueue() {
+    localStorage.removeItem(OFFLINE_KEY);
+    updateOfflineBanner();
+}
+
+async function updateOfflineBanner() {
+    const queue = getOfflineQueue();
+    const banner = document.getElementById('offline-banner');
+    if (!banner) return;
+
+    const isOnline = await checkActualConnectivity();
+    
+    if (!isOnline) {
+        banner.textContent = '📴 You are currently offline. Changes will be saved locally.';
+        banner.style.display = 'block';
+        banner.style.background = '#fee2e2'; 
+    } else if (queue.length > 0) {
+        banner.textContent = `🟢 Online: ${queue.length} member(s) saved offline, syncing...`;
+        banner.style.display = 'block';
+        banner.style.background = '#dcfce7'; 
+    } else {
+        banner.style.display = 'none';
+    }
+}
+
+async function flushOfflineQueue() {
+    const queue = getOfflineQueue();
+    if (queue.length === 0) return;
+
+    const failed = [];
+    for (const item of queue) {
+        try {
+            const res = await apiFetch('/api/members', {
+                method: 'POST',
+                body: JSON.stringify(item)
+            });
+            if (!res.success) failed.push(item);
+        } catch (e) {
+            // If it's a 400 error (e.g. duplicate), discard it from the queue permanently
+            if (e.status === 400) {
+                console.warn('Discarding invalid offline record:', item, e.message);
+                continue; 
+            }
+            failed.push(item);
+        }
+    }
+
+    if (failed.length > 0) {
+        localStorage.setItem(OFFLINE_KEY, JSON.stringify(failed));
+    } else {
+        clearOfflineQueue();
+    }
+
+    updateOfflineBanner();
+    if (failed.length < queue.length) {
+        showToast('✅ Offline members synced.');
+        if (typeof loadMembers === 'function') loadMembers();
+    }
+}
+
+window.addEventListener('online', async () => {
+    showToast('🟢 Connection restored. Syncing...');
+    await flushOfflineQueue();
+    await updateOfflineBanner();
+});
+
+document.addEventListener('DOMContentLoaded', async () => {
+    await updateOfflineBanner();
+    if (await checkActualConnectivity()) {
+        await flushOfflineQueue();
+    }
+});
+
+
+--------------------------------------------------------------------------------
+FILE: /workspaces/gym-manager/php gym manager/index.php
+--------------------------------------------------------------------------------
+<?php
+// AGENT: This is the ONLY entry point. All URLs route through here.
+// Add new routes in the match() block. Never create separate entry PHP files.
+
+require_once __DIR__ . '/config/app.php';
+require_once __DIR__ . '/config/db.php';
+require_once __DIR__ . '/core/Database.php';
+require_once __DIR__ . '/core/Auth.php';
+require_once __DIR__ . '/core/CSRF.php';
+require_once __DIR__ . '/core/Request.php';
+require_once __DIR__ . '/core/Response.php';
+require_once __DIR__ . '/core/Helpers.php';
+
+// Load all models
+foreach (glob(__DIR__ . '/models/*.php') as $model) require_once $model;
+// Load all controllers
+foreach (glob(__DIR__ . '/controllers/*.php') as $ctrl) require_once $ctrl;
+
+Auth::start();
+
+$uri    = parse_url($_SERVER['REQUEST_URI'], PHP_URL_PATH);
+$method = $_SERVER['REQUEST_METHOD'];
+
+// FIX: Remove /index.php from the URI so the router still works with the short command
+$uri = str_replace('/index.php', '', $uri);
+if ($uri === '') $uri = '/';
+
+match(true) {
+
+    // Auth routes
+    $uri === '/login'  && $method === 'GET'  => (new AuthController)->showLogin(),
+    $uri === '/login'  && $method === 'POST' => (new AuthController)->login(),
+    $uri === '/logout' && $method === 'POST' => (new AuthController)->logout(),
+    $uri === '/register' && $method === 'GET'  => (new AuthController)->showRegister(),
+    $uri === '/register' && $method === 'POST' => (new AuthController)->register(),
+
+    // Setup
+    $uri === '/setup'  && $method === 'GET'  => (new GymController)->showSetup(),
+    $uri === '/setup'  && $method === 'POST' => (new GymController)->createGym(),
+
+    // Dashboard
+    $uri === '/'        => (new DashboardController)->index(),
+    $uri === '/dashboard' => (new DashboardController)->index(),
+
+    // Members (API)
+    $uri === '/api/members'            && $method === 'GET'    => (new MemberController)->list(),
+    $uri === '/api/members'            && $method === 'POST'   => (new MemberController)->add(),
+    $uri === '/api/members/edit'       && $method === 'POST'   => (new MemberController)->edit(),
+    $uri === '/api/members/renew'      && $method === 'POST'   => (new MemberController)->renew(),
+    $uri === '/api/members/clear-due'     && $method === 'POST'   => (new MemberController)->clearDue(),
+    $uri === '/api/members/mark-dead'  && $method === 'POST'   => (new MemberController)->markDead(),
+    $uri === '/api/members/rejoin'     && $method === 'POST'   => (new MemberController)->rejoin(),
+    $uri === '/api/members/check-duplicate' && $method === 'GET' => (new MemberController)->checkDuplicate(),
+
+    // Services (API)
+    $uri === '/api/services'           && $method === 'GET'    => (new ServiceController)->list(),
+    $uri === '/api/services'           && $method === 'POST'   => (new ServiceController)->add(),
+    $uri === '/api/services/edit'      && $method === 'POST'   => (new ServiceController)->edit(),
+    $uri === '/api/services/delete'    && $method === 'POST'   => (new ServiceController)->delete(),
+
+    // Settings (API)
+    $uri === '/api/settings'           && $method === 'GET'    => (new SettingsController)->get(),
+    $uri === '/api/settings'           && $method === 'POST'   => (new SettingsController)->save(),
+
+    // Analytics (API)
+    $uri === '/api/analytics'          && $method === 'GET'    => (new AnalyticsController)->getData(),
+
+    // Export
+    $uri === '/export/members'         && $method === 'GET'    => (new ExportController)->members(),
+    $uri === '/export/payments'        && $method === 'GET'    => (new ExportController)->payments(),
+
+    // Settings page
+    $uri === '/settings'               && $method === 'GET'    => (new SettingsController)->showPage(),
+
+    // Analytics page
+    $uri === '/analytics'              && $method === 'GET'    => (new AnalyticsController)->showPage(),
+
+    // Member portal
+    $uri === '/portal'                 && $method === 'GET'    => (new PortalController)->index(),
+    $uri === '/paywall'                && $method === 'GET'    => (new DashboardController)->showPaywall(),
+
+    default => (function() {
+        http_response_code(404);
+        echo '404 Not Found';
+    })()
+};
+
+
+--------------------------------------------------------------------------------
+FILE: /workspaces/gym-manager/php gym manager/tests/integration_test.php
+--------------------------------------------------------------------------------
+<?php
+define('TEST_MODE', true);
+session_start();
+require_once __DIR__ . '/../config/app.php';
+require_once __DIR__ . '/../config/db.php';
+require_once __DIR__ . '/../core/Database.php';
+require_once __DIR__ . '/../core/Auth.php';
+require_once __DIR__ . '/../core/CSRF.php';
+require_once __DIR__ . '/../core/Request.php';
+require_once __DIR__ . '/../core/Response.php';
+require_once __DIR__ . '/../core/Helpers.php';
+
+// Load all models and controllers
+foreach (glob(__DIR__ . '/../models/*.php') as $model) require_once $model;
+foreach (glob(__DIR__ . '/../controllers/*.php') as $ctrl) require_once $ctrl;
+
+function simulateRequest($uri, $method, $postData = [], $sessionData = []) {
+    $_SERVER['REQUEST_URI'] = $uri;
+    $_SERVER['REQUEST_METHOD'] = $method;
+    $_POST = $postData;
+    
+    foreach ($sessionData as $k => $v) {
+        $_SESSION[$k] = $v;
+    }
+
+    ob_start();
+    try {
+        match(true) {
+            $uri === '/login'  && $method === 'GET'  => (new AuthController)->showLogin(),
+            $uri === '/login'  && $method === 'POST' => (new AuthController)->login(),
+            $uri === '/logout' && $method === 'POST' => (new AuthController)->logout(),
+            $uri === '/setup'  && $method === 'GET'  => (new GymController)->showSetup(),
+            $uri === '/setup'  && $method === 'POST' => (new GymController)->createGym(),
+            $uri === '/dashboard' => (new DashboardController)->index(),
+            $uri === '/api/members'            && $method === 'GET'    => (new MemberController)->list(),
+            $uri === '/api/members'            && $method === 'POST'   => (new MemberController)->add(),
+            $uri === '/api/members/renew'      && $method === 'POST'   => (new MemberController)->renew(),
+            $uri === '/api/members/clear-due'  && $method === 'POST'   => (new MemberController)->clearDue(),
+            $uri === '/api/analytics'          && $method === 'GET'    => (new AnalyticsController)->getData(),
+            $uri === '/api/settings'           && $method === 'GET'    => (new SettingsController)->get(),
+            $uri === '/api/settings'           && $method === 'POST'   => (new SettingsController)->save(),
+            $uri === '/export/members'         && $method === 'GET'    => (new ExportController)->members(),
+            default => print "404 Not Found"
+        };
+    } catch (Exception $e) {
+        echo "Exception: " . $e->getMessage();
+    }
+    return ob_get_clean();
+}
+
+// --- TEST SUITE ---
+echo "Starting Integration Tests...\n";
+
+// 1. Test Login
+echo "Testing Login... ";
+$_SESSION = [];
+$csrf = CSRF::token();
+$loginResponse = simulateRequest('/login', 'POST', [
+    'email' => 'owner@gymtest.com',
+    'password' => 'test1234',
+    'csrf_token' => $csrf
+], []);
+if (isset($_SESSION['user_id']) && $_SESSION['user_id'] > 0) {
+    echo "✅ SUCCESS\n";
+} else {
+    echo "❌ FAILED (Session not set)\n";
+}
+
+// 2. Test Dashboard Access
+echo "Testing Dashboard Access... ";
+$dashboardResponse = simulateRequest('/dashboard', 'GET', [], [
+    'user_id' => 1,
+    'role' => 'owner',
+    'gym_id' => 1,
+    'gym_name' => 'Brar Fitness Club'
+]);
+if (str_contains($dashboardResponse, 'Monthly Collection')) {
+    echo "✅ SUCCESS\n";
+} else {
+    echo "❌ FAILED (Dashboard not rendered)\n";
+}
+
+// 3. Test API: Members List
+echo "Testing Member List API... ";
+$membersResponse = simulateRequest('/api/members', 'GET', [], [
+    'user_id' => 1,
+    'role' => 'owner',
+    'gym_id' => 1
+]);
+$data = json_decode($membersResponse, true);
+if (isset($data['success']) && $data['success'] === true && isset($data['members'])) {
+    echo "✅ SUCCESS (Count: " . count($data['members']) . ")\n";
+} else {
+    echo "❌ FAILED: " . $membersResponse . "\n";
+}
+
+// 4. Test API: Add Member
+echo "Testing Add Member API... ";
+$addResponse = simulateRequest('/api/members', 'POST', [
+    'member_name' => 'Test User ' . time(),
+    'phone_number' => '123456789' . rand(0,9),
+    'service_id' => 1,
+    'service_name' => 'Weight Training',
+    'monthly_fee' => 1000,
+    'amount_paid' => 1000,
+    'start_date' => date('Y-m-d'),
+    'csrf_token' => CSRF::token()
+], [
+    'user_id' => 1,
+    'role' => 'owner',
+    'gym_id' => 1
+]);
+$data = json_decode($addResponse, true);
+if (isset($data['success']) && $data['success'] === true) {
+    echo "✅ SUCCESS\n";
+} else {
+    echo "❌ FAILED: " . $addResponse . "\n";
+}
+
+// 5. Test API: Renew Member
+echo "Testing Renew Member API... ";
+$memberId = 1; 
+$renewResponse = simulateRequest('/api/members/renew', 'POST', [
+    'id' => $memberId,
+    'months' => 1,
+    'csrf_token' => CSRF::token()
+], [
+    'user_id' => 1,
+    'role' => 'owner',
+    'gym_id' => 1
+]);
+$data = json_decode($renewResponse, true);
+if (isset($data['success']) && $data['success'] === true) {
+    echo "✅ SUCCESS\n";
+} else {
+    echo "❌ FAILED: " . $renewResponse . "\n";
+}
+
+// 6. Test API: Analytics
+echo "Testing Analytics API... ";
+$analyticsResponse = simulateRequest('/api/analytics', 'GET', [], [
+    'user_id' => 1,
+    'role' => 'owner',
+    'gym_id' => 1
+]);
+$data = json_decode($analyticsResponse, true);
+if (isset($data['success']) && $data['success'] === true && isset($data['stats'])) {
+    echo "✅ SUCCESS\n";
+} else {
+    echo "❌ FAILED: " . $analyticsResponse . "\n";
+}
+
+echo "\nTests completed.\n";
+
+
+--------------------------------------------------------------------------------
+FILE: /workspaces/gym-manager/php gym manager/views/settings/index.php
+--------------------------------------------------------------------------------
+<?php
+require_once __DIR__ . '/../layout/header.php';
+?>
+<div class="page-shell">
+    <header style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 24px;">
+        <h1>Gym Settings</h1>
+        <a href="/dashboard" class="btn">Back to Dashboard</a>
+    </header>
+
+    <form id="settings-form" style="display: grid; gap: 24px;">
+        <?= CSRF::field() ?>
+        
+        <div class="card">
+            <h3>Gym Information</h3>
+            <div style="display: grid; gap: 15px;">
+                <div>
+                    <label>Gym Name</label>
+                    <input type="text" name="gym_name" value="<?= htmlspecialchars($gym['gym_name']) ?>">
+                </div>
+                <div>
+                    <label>Owner Name</label>
+                    <input type="text" name="owner_name" value="<?= htmlspecialchars($gym['owner_name'] ?? '') ?>">
+                </div>
+                <div>
+                    <label>Owner Phone</label>
+                    <input type="tel" name="owner_phone" value="<?= htmlspecialchars($gym['owner_phone'] ?? '') ?>">
+                </div>
+                <div>
+                    <label>Address</label>
+                    <input type="text" name="gym_address" value="<?= htmlspecialchars($gym['gym_address'] ?? '') ?>">
+                </div>
+                <div>
+                    <label>UPI ID</label>
+                    <input type="text" name="upi_id" value="<?= htmlspecialchars($gym['upi_id'] ?? '') ?>">
+                </div>
+            </div>
+        </div>
+
+        <div class="card">
+            <h3>Services & Pricing</h3>
+            <div id="services-list" style="display: grid; gap: 10px; margin-bottom: 20px;">
+                <!-- Loaded via JS -->
+            </div>
+            <div style="display: grid; grid-template-columns: 1fr 1fr auto; gap: 10px;">
+                <input type="text" id="new-service-name" placeholder="Service Name">
+                <input type="number" id="new-service-price" placeholder="Price">
+                <button type="button" onclick="addService()" class="btn btn-primary" style="width: auto;">Add</button>
+            </div>
+        </div>
+
+        <div class="card">
+            <h3>WhatsApp Templates</h3>
+            <div style="display: grid; gap: 15px;">
+                <div>
+                    <label>Overdue Template</label>
+                    <textarea name="template_overdue" style="width:100%; padding:10px; border-radius:12px; border:1px solid #e5e7eb; height:80px;"><?= htmlspecialchars($settings['template_overdue'] ?? '') ?></textarea>
+                    <small style="color:#6b7280;">Variables: {name}, {due}</small>
+                </div>
+                <div>
+                    <label>Expiring Soon Template</label>
+                    <textarea name="template_expiring_soon" style="width:100%; padding:10px; border-radius:12px; border:1px solid #e5e7eb; height:80px;"><?= htmlspecialchars($settings['template_expiring_soon'] ?? '') ?></textarea>
+                    <small style="color:#6b7280;">Variables: {name}, {days}</small>
+                </div>
+                <div>
+                    <label>Expired Today Template</label>
+                    <textarea name="template_expires_today" style="width:100%; padding:10px; border-radius:12px; border:1px solid #e5e7eb; height:80px;"><?= htmlspecialchars($settings['template_expires_today'] ?? '') ?></textarea>
+                    <small style="color:#6b7280;">Variables: {name}</small>
+                </div>
+                <div>
+                    <label>Expired Template</label>
+                    <textarea name="template_expired" style="width:100%; padding:10px; border-radius:12px; border:1px solid #e5e7eb; height:80px;"><?= htmlspecialchars($settings['template_expired'] ?? '') ?></textarea>
+                    <small style="color:#6b7280;">Variables: {name}, {days}</small>
+                </div>
+                <div>
+                    <label>Rejoin Template</label>
+                    <textarea name="template_rejoin" style="width:100%; padding:10px; border-radius:12px; border:1px solid #e5e7eb; height:80px;"><?= htmlspecialchars($settings['template_rejoin'] ?? '') ?></textarea>
+                    <small style="color:#6b7280;">Variables: {name}</small>
+                </div>
+            </div>
+        </div>
+
+        <div class="card">
+            <h3>Advanced Settings</h3>
+            <div>
+                <label>Dead Client Threshold (Days)</label>
+                <input type="number" name="dead_threshold_days" value="<?= $settings['dead_threshold_days'] ?? 60 ?>">
+            </div>
+        </div>
+
+        <button type="submit" class="btn btn-primary">Save All Settings</button>
+    </form>
+</div>
+
+<script src="/assets/js/app.js"></script>
+<script>
+    const services = <?= json_encode($services) ?>;
+    
+    function renderServices() {
+        const list = document.getElementById('services-list');
+        list.innerHTML = services.map(s => `
+            <div style="display: grid; grid-template-columns: 1fr 1fr auto; gap: 10px; align-items: center; background: #f9fafb; padding: 10px; border-radius: 12px; border: 1px solid #e5e7eb;">
+                <input type="text" value="${s.name}" onchange="updateService(${s.id}, 'name', this.value)">
+                <input type="number" value="${s.price}" onchange="updateService(${s.id}, 'price', this.value)">
+                <button type="button" onclick="deleteService(${s.id})" class="btn btn-danger" style="padding: 8px 12px;">✕</button>
+            </div>
+        `).join('');
+    }
+
+    async function addService() {
+        const name = document.getElementById('new-service-name').value;
+        const price = document.getElementById('new-service-price').value;
+        if (!name || !price) return;
+        
+        try {
+            const res = await apiFetch('/api/services', {
+                method: 'POST',
+                body: JSON.stringify({ name, price })
+            });
+            services.push(res.service);
+            renderServices();
+            document.getElementById('new-service-name').value = '';
+            document.getElementById('new-service-price').value = '';
+            showToast('Service added');
+        } catch (e) { showToast(e.message, 'error'); }
+    }
+
+    async function updateService(id, field, value) {
+        try {
+            const service = services.find(s => s.id === id);
+            service[field] = value;
+            await apiFetch('/api/services/edit', {
+                method: 'POST',
+                body: JSON.stringify({ id, ...service })
+            });
+            showToast('Service updated');
+        } catch (e) { showToast(e.message, 'error'); }
+    }
+
+    async function deleteService(id) {
+        if (!confirm('Delete this service?')) return;
+        try {
+            await apiFetch('/api/services/delete', {
+                method: 'POST',
+                body: JSON.stringify({ id })
+            });
+            const idx = services.findIndex(s => s.id === id);
+            services.splice(idx, 1);
+            renderServices();
+            showToast('Service deleted');
+        } catch (e) { showToast(e.message, 'error'); }
+    }
+
+    document.getElementById('settings-form').addEventListener('submit', async (e) => {
+        e.preventDefault();
+        const formData = new FormData(e.target);
+        const data = Object.fromEntries(formData.entries());
+        try {
+            await apiFetch('/api/settings', {
+                method: 'POST',
+                body: JSON.stringify(data)
+            });
+            showToast('Settings saved!');
+        } catch (e) { showToast(e.message, 'error'); }
+    });
+
+    renderServices();
+</script>
+<?php
+require_once __DIR__ . '/../layout/footer.php';
+?>
+
+
+--------------------------------------------------------------------------------
+FILE: /workspaces/gym-manager/php gym manager/views/layout/header.php
+--------------------------------------------------------------------------------
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="csrf-token" content="<?= CSRF::token() ?>">
+    <meta name="theme-color" content="#111827">
+    <title><?= APP_NAME ?></title>
+    <link rel="stylesheet" href="/assets/css/app.css">
+</head>
+<body>
+<div id="toast" class="toast"></div>
+<div id="offline-banner" class="offline-banner" style="display:none"></div>
+
+
+--------------------------------------------------------------------------------
+FILE: /workspaces/gym-manager/php gym manager/views/layout/footer.php
+--------------------------------------------------------------------------------
+</body>
+</html>
+
+
+--------------------------------------------------------------------------------
+FILE: /workspaces/gym-manager/php gym manager/views/setup/create_gym.php
+--------------------------------------------------------------------------------
+<?php
+require_once __DIR__ . '/../layout/header.php';
+?>
+<div class="page-shell">
+    <div class="card" style="max-width: 500px; margin: 40px auto;">
+        <h2>Setup Your Gym</h2>
+        <p>Complete these details to start tracking your members</p>
+        <form action="/setup" method="POST" style="margin-top: 20px;">
+            <?= CSRF::field() ?>
+            <div style="margin-bottom: 15px;">
+                <label>Gym Name *</label>
+                <input type="text" name="gym_name" required placeholder="e.g. Brar Fitness Club">
+            </div>
+            <div class="form-row">
+                <div style="margin-bottom: 15px;">
+                    <label>Owner Name</label>
+                    <input type="text" name="owner_name" placeholder="Your Name">
+                </div>
+                <div style="margin-bottom: 15px;">
+                    <label>Phone Number</label>
+                    <input type="tel" name="owner_phone" placeholder="9876543210">
+                </div>
+            </div>
+            <div style="margin-bottom: 15px;">
+                <label>Gym Address</label>
+                <input type="text" name="gym_address" placeholder="Street, City, State">
+            </div>
+            <div style="margin-bottom: 20px;">
+                <label>UPI ID (for payments)</label>
+                <input type="text" name="upi_id" placeholder="yourname@upi">
+            </div>
+            <button type="submit" class="btn btn-primary">Create Gym & Start</button>
+        </form>
+    </div>
+</div>
+<?php
+require_once __DIR__ . '/../layout/footer.php';
+?>
+
+
+--------------------------------------------------------------------------------
+FILE: /workspaces/gym-manager/php gym manager/views/paywall/index.php
+--------------------------------------------------------------------------------
+<?php
+require_once __DIR__ . '/../layout/header.php';
+?>
+<div class="lockout-overlay" style="position: fixed; inset: 0; background: rgba(0,0,0,.8); display: flex; align-items: center; justify-content: center; z-index: 100;">
+    <div class="lockout-card" style="background: #fff; border-radius: 24px; padding: 32px; max-width: 420px; width: 90%; text-align: center;">
+        <h2 style="font-size: 2rem; margin-bottom: 16px;">Trial Expired</h2>
+        <p style="color: #6b7280; margin-bottom: 24px;">Your 14-day free trial has ended. Please pay ₹499 to unlock your dashboard.</p>
+        <div style="background: #f3f4f6; border: 1px dashed #d1d5d closest; padding: 20px; border-radius: 14px; margin-bottom: 24px;">
+            <strong>UPI ID:</strong> <?= htmlspecialchars($gym['upi_id'] ?? 'Not set') ?>
+        </div>
+        <a href="upi://pay?pa=<?= htmlspecialchars($gym['upi_id'] ?? '') ?>&am=499&cu=INR" class="btn btn-primary" style="text-decoration: none; display: block; text-align: center;">
+            Pay Now via UPI
+        </a>
+        <p style="font-size: 0.8rem; color: #9ca3af; margin-top: 16px;">After payment, contact support to activate your account.</p>
+    </div>
+</div>
+<?php
+require_once __DIR__ . '/../layout/footer.php';
+?>
+
+
+--------------------------------------------------------------------------------
+FILE: /workspaces/gym-manager/php gym manager/views/dashboard/index.php
+--------------------------------------------------------------------------------
+<?php
+require_once __DIR__ . '/../layout/header.php';
+?>
+<div class="page-shell">
+    <header style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 24px;">
+        <div>
+            <h1 style="margin:0; font-size: 1.5rem;"><?= htmlspecialchars($gym['gym_name']) ?></h1>
+            <p style="margin:0; font-size: 0.8rem; color: #6b7280;">Trial: <?= TRIAL_DAYS - ($daysUsed ?? 0) ?> days left</p>
+        </div>
+        <form action="/logout" method="POST">
+            <?= CSRF::field() ?>
+            <button type="submit" class="btn btn-danger" style="padding: 8px 16px;">Logout</button>
+        </form>
+    </header>
+
+    <div class="cash-header card" style="background: #dcfce7; color: #166534; text-align: center; padding: 20px; border-radius: 16px; margin-bottom: 24px;">
+        <p style="font-size: 0.8rem; font-weight: 700; text-transform: uppercase; margin: 0;">Monthly Collection</p>
+        <h2 style="font-size: 2.5rem; margin: 10px 0;">₹<?= number_format($monthlyCollection, 0) ?></h2>
+    </div>
+
+    <div class="search-container" style="margin-bottom: 20px;">
+        <input type="text" id="member-search" class="search-bar" placeholder="Search members by name or phone..." style="width: 100%; padding: 12px; border: 1px solid #e5e7eb; border-radius: 12px; font-size: 1rem;">
+    </div>
+
+    <div class="tab-group" style="display: flex; background: #f3f4f6; border-radius: 14px; padding: 4px; gap: 4px; margin-bottom: 24px;">
+        <button class="btn tab-btn active" data-tab="running">Running <span class="tab-count"><?= $stats['active'] ?></span></button>
+        <button class="btn tab-btn" data-tab="overdue">Overdue <span class="tab-count"><?= $stats['overdue'] ?></span></button>
+        <button class="btn tab-btn" data-tab="all">All <span class="tab-count"><?= $stats['all'] ?></span></button>
+        <button class="btn tab-btn" data-tab="dead">Dead <span class="tab-count"><?= $stats['dead'] ?></span></button>
+    </div>
+
+    <div id="member-list" style="min-height: 300px;">
+        <!-- Loaded via JS -->
+    </div>
+
+    <button onclick="openAddMemberModal()" class="btn btn-primary" style="position: fixed; bottom: 24px; right: 24px; width: auto; border-radius: 99px; padding: 16px 24px; box-shadow: 0 4px 12px rgba(0,0,0,0.2);">
+        + Add Member
+    </button>
+
+    <!-- Add Member Modal -->
+    <div id="add-member-modal" style="display:none; position: fixed; inset:0; background: rgba(0,0,0,0.5); z-index: 100; align-items: center; justify-content: center;">
+        <div class="card" style="width: 90%; max-width: 500px; max-height: 90vh; overflow-y: auto;">
+            <h3>Add New Member</h3>
+            <form id="add-member-form" style="display: grid; gap: 15px;">
+                <?= CSRF::field() ?>
+                <div>
+                    <label>Full Name *</label>
+                    <input type="text" name="member_name" required>
+                </div>
+                <div>
+                    <label>Phone Number *</label>
+                    <input type="tel" name="phone_number" required maxlength="10">
+                </div>
+                <div>
+                    <label>Service</label>
+                    <select name="service_id">
+                        <?php foreach ($services as $s): ?>
+                            <option value="<?= $s['id'] ?>"><?= htmlspecialchars($s['name']) ?> (₹<?= $s['price'] ?>)</option>
+                        <?php endforeach; ?>
+                    </select>
+                </div>
+                <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 10px;">
+                    <div>
+                        <label>Monthly Fee</label>
+                        <input type="number" name="monthly_fee" value="1500">
+                    </div>
+                    <div>
+                        <label>Paid Today</label>
+                        <input type="number" name="amount_paid" value="0">
+                    </div>
+                </div>
+                <div>
+                    <label>Start Date</label>
+                    <div style="display: flex; gap: 5px; margin-bottom: 8px;">
+                        <button type="button" onclick="setQuickDate('today')" class="btn" style="flex:1; padding: 5px; font-size: 0.7rem; background: #f3f4f6; color: #333;">Today</button>
+                        <button type="button" onclick="setQuickDate('yesterday')" class="btn" style="flex:1; padding: 5px; font-size: 0.7rem; background: #f3f4f6; color: #333;">Yesterday</button>
+                        <button type="button" onclick="setQuickDate('custom')" class="btn" style="flex:1; padding: 5px; font-size: 0.7rem; background: #e5e7eb; color: #333;">Custom</button>
+                    </div>
+                    <input type="date" name="start_date" id="add-member-start-date" value="<?= date('Y-m-d') ?>">
+                </div>
+                <div style="display: flex; gap: 10px; justify-content: flex-end;">
+                    <button type="button" onclick="closeAddMemberModal()" class="btn">Cancel</button>
+                    <button type="submit" class="btn btn-primary" style="width: auto;">Save Member</button>
+                </div>
+            </form>
+        </div>
+    </div>
+
+    <!-- Clear Due Modal -->
+    <div id="clear-due-modal" style="display:none; position: fixed; inset:0; background: rgba(0,0,0,0.5); z-index: 100; align-items: center; justify-content: center;">
+        <div class="card" style="width: 90%; max-width: 400px;">
+            <h3>Clear Pending Due</h3>
+            <p id="clear-due-member-name" style="font-weight: 700; margin-bottom: 5px;"></p>
+            <div style="background: #fee2e2; color: #b91c1c; padding: 15px; border-radius: 12px; text-align: center; margin-bottom: 20px;">
+                <span style="font-size: 0.8rem; color: #b91c1c;">Total Pending</span><br>
+                <strong id="clear-due-total" style="font-size: 1.8rem;">₹0</strong>
+            </div>
+            <form id="clear-due-form" style="display: grid; gap: 15px;">
+                <?= CSRF::field() ?>
+                <input type="hidden" name="id" id="clear-due-id">
+                <div>
+                    <label>Amount to Clear</label>
+                    <input type="number" name="amount" id="clear-due-amount" required step="0.01">
+                </div>
+                <div style="display: flex; gap: 10px; justify-content: flex-end;">
+                    <button type="button" onclick="closeClearDueModal()" class="btn">Cancel</button>
+                    <button type="button" id="btn-clear-all" class="btn" style="background:#f59e0b; color:#fff;">Clear All</button>
+                    <button type="submit" class="btn btn-primary" style="width: auto;">Update Ledger</button>
+                </div>
+            </form>
+        </div>
+    </div>
+
+    <!-- Rejoin Modal -->
+    <div id="rejoin-modal" style="display:none; position: fixed; inset:0; background: rgba(0,0,0,0.5); z-index: 100; align-items: center; justify-content: center;">
+        <div class="card" style="width: 90%; max-width: 500px; max-height: 90vh; overflow-y: auto;">
+            <h3>Member Rejoining</h3>
+            <p id="rejoin-member-name" style="font-weight: 700; margin-bottom: 20px;"></p>
+            <form id="rejoin-form" style="display: grid; gap: 15px;">
+                <?= CSRF::field() ?>
+                <input type="hidden" name="id" id="rejoin-id">
+                <div>
+                    <label>Service</label>
+                    <select name="service_id" id="rejoin-service-id">
+                        <?php foreach ($services as $s): ?>
+                            <option value="<?= $s['id'] ?>"><?= htmlspecialchars($s['name']) ?> (₹<?= $s['price'] ?>)</option>
+                        <?php endforeach; ?>
+                    </select>
+                </div>
+                <div>
+                    <label>Service Name (for record)</label>
+                    <input type="text" name="service_name" id="rejoin-service-name" required>
+                </div>
+                <div>
+                    <label>Monthly Fee</label>
+                    <input type="number" name="monthly_fee" id="rejoin-monthly-fee" required>
+                </div>
+                <div>
+                    <label>Start Date</label>
+                    <div style="display: flex; gap: 5px; margin-bottom: 8px;">
+                        <button type="button" onclick="setQuickDate('today', 'rejoin-start-date')" class="btn" style="flex:1; padding: 5px; font-size: 0.7rem; background: #f3f4f6; color: #333;">Today</button>
+                        <button type="button" onclick="setQuickDate('yesterday', 'rejoin-start-date')" class="btn" style="flex:1; padding: 5px; font-size: 0.7rem; background: #f3f4f6; color: #333;">Yesterday</button>
+                        <button type="button" onclick="setQuickDate('custom', 'rejoin-start-date')" class="btn" style="flex:1; padding: 5px; font-size: 0.7rem; background: #e5e7eb; color: #333;">Custom</button>
+                    </div>
+                    <input type="date" name="start_date" id="rejoin-start-date" value="<?= date('Y-m-d') ?>">
+                </div>
+                <div style="display: flex; gap: 10px; justify-content: flex-end;">
+                    <button type="button" onclick="closeRejoinModal()" class="btn">Cancel</button>
+                    <button type="submit" class="btn btn-primary" style="width: auto;">Confirm Rejoin</button>
+                </div>
+            </form>
+        </div>
+    </div>
+
+                <div>
+                    <label>Phone Number *</label>
+                    <input type="tel" name="phone_number" required maxlength="10">
+                </div>
+                <div>
+                    <label>Service</label>
+                    <select name="service_id">
+                        <?php foreach ($services as $s): ?>
+                            <option value="<?= $s['id'] ?>"><?= htmlspecialchars($s['name']) ?> (₹<?= $s['price'] ?>)</option>
+                        <?php endforeach; ?>
+                    </select>
+                </div>
+                <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 10px;">
+                    <div>
+                        <label>Monthly Fee</label>
+                        <input type="number" name="monthly_fee" value="1500">
+                    </div>
+                    <div>
+                        <label>Paid Today</label>
+                        <input type="number" name="amount_paid" value="0">
+                    </div>
+                </div>
+                    <div>
+                        <label>Start Date</label>
+                        <div style="display: flex; gap: 5px; margin-bottom: 8px;">
+                            <button type="button" onclick="setQuickDate('today')" class="btn" style="flex:1; padding: 5px; font-size: 0.7rem; background: #f3f4f6; color: #333;">Today</button>
+                            <button type="button" onclick="setQuickDate('yesterday')" class="btn" style="flex:1; padding: 5px; font-size: 0.7rem; background: #f3f4f6; color: #333;">Yesterday</button>
+                            <button type="button" onclick="setQuickDate('custom')" class="btn" style="flex:1; padding: 5px; font-size: 0.7rem; background: #e5e7eb; color: #333;">Custom</button>
+                        </div>
+                        <input type="date" name="start_date" id="add-member-start-date" value="<?= date('Y-m-d') ?>">
+                    </div>
+
+                <div style="display: flex; gap: 10px; justify-content: flex-end;">
+                    <button type="button" onclick="closeAddMemberModal()" class="btn">Cancel</button>
+                    <button type="submit" class="btn btn-primary" style="width: auto;">Save Member</button>
+                </div>
+            </form>
+        </div>
+    </div>
+</div>
+
+<script src="/assets/js/app.js"></script>
+<script src="/assets/js/offline.js"></script>
+<script src="/assets/js/dashboard.js"></script>
+<?php
+require_once __DIR__ . '/../layout/footer.php';
+?>
+
+
+--------------------------------------------------------------------------------
+FILE: /workspaces/gym-manager/php gym manager/views/analytics/index.php
+--------------------------------------------------------------------------------
+<?php
+require_once __DIR__ . '/../views/layout/header.php';
+?>
+<div class="page-shell">
+    <header style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 24px;">
+        <h1>Gym Analytics</h1>
+        <a href="/dashboard" class="btn">Back to Dashboard</a>
+    </header>
+
+    <div class="stat-cards" style="display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 20px;">
+        <div class="card stat-card" style="text-align:center;">
+            <div class="stat-label">Active Members</div>
+            <div id="stat-active" class="stat-value">0</div>
+        </div>
+        <div class="card stat-card" style="text-align:center;">
+            <div class="stat-label">Monthly Earnings</div>
+            <div id="stat-earnings" class="stat-value">₹0</div>
+        </div>
+        <div class="card stat-card" style="text-align:center;">
+            <div class="stat-label">New Joins</div>
+            <div id="stat-joins" class="stat-value">0</div>
+        </div>
+        <div class="card stat-card" style="text-align:center;">
+            <div class="stat-label">Renewals</div>
+            <div id="stat-renewals" class="stat-value">0</div>
+        </div>
+    </div>
+
+    <div class="card">
+        <h3>Revenue Trend</h3>
+        <canvas id="revenueChart"></canvas>
+    </div>
+
+    <div class="card">
+        <h3>Member Growth</h3>
+        <canvas id="growthChart"></canvas>
+    </div>
+
+    <div class="card">
+        <h3>Service Distribution</h3>
+        <canvas id="serviceChart"></canvas>
+    </div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+<script src="/assets/js/app.js"></script>
+<script src="/assets/js/analytics.js"></script>
+<?php
+require_once __DIR__ . '/../views/layout/footer.php';
+?>
+
+
+--------------------------------------------------------------------------------
+FILE: /workspaces/gym-manager/php gym manager/views/portal/index.php
+--------------------------------------------------------------------------------
+<?php
+require_once __DIR__ . '/../layout/header.php';
+?>
+<div class="page-shell" style="text-align:center; max-width: 400px;">
+    <div class="card">
+        <h1 style="margin-bottom: 8px;"><?= htmlspecialchars($gym_name ?? 'My Gym') ?></h1>
+        <p style="color:#6b7280; margin-bottom: 30px;">Member Portal</p>
+
+        <div class="portal-ring" style="display:flex; flex-direction:column; align-items:center; margin-bottom: 30px;">
+            <div style="position:relative; width:150px; height:150px; border: 15px solid #e5e7eb; border-radius:50%; display:flex; align-items:center; justify-content:center;">
+                <div style="text-align:center;">
+                    <span style="font-size: 2.5rem; font-weight: 800; display:block;"><?= max(0, $daysLeft) ?></span>
+                    <span style="font-size: 0.8rem; color:#6b7280; text-transform:uppercase;">Days Left</span>
+                </div>
+            </div>
+        </div>
+
+        <div style="text-align:left; display:grid; gap:12px; margin-bottom: 24px;">
+            <div style="display:flex; justify-content:space-between; border-bottom:1px solid #f3f4f6; padding-bottom:8px;">
+                <span style="color:#6b7280;">Status</span>
+                <strong style="color:<?= $statusColor ?>;"><?= strtoupper($member['status']) ?></strong>
+            </div>
+            <div style="display:flex; justify-content:space-between; border-bottom:1px solid #f3f4f6; padding-bottom:8px;">
+                <span style="color:#6b7280;">Service</span>
+                <strong><?= htmlspecialchars($member['service_name']) ?></strong>
+            </div>
+            <div style="display:flex; justify-content:space-between; border-bottom:1px solid #f3f4f6; padding-bottom:8px;">
+                <span style="color:#6b7280;">Expiry Date</span>
+                <strong><?= formatDate($member['expiry_date']) ?></strong>
+            </div>
+            <?php if ($member['pending_due'] > 0): ?>
+            <div style="display:flex; justify-content:space-between; color:#dc2626; font-weight:700;">
+                <span>Pending Due</span>
+                <span>₹<?= number_format($member['pending_due'], 0) ?></span>
+            </div>
+            <?php endif; ?>
+        </div>
+
+        <form action="/logout" method="POST">
+            <?= CSRF::field() ?>
+            <button type="submit" class="btn btn-danger" style="width:100%;">Sign Out</button>
+        </form>
+    </div>
+</div>
+<?php
+require_once __DIR__ . '/../layout/footer.php';
+?>
+
+
+--------------------------------------------------------------------------------
+FILE: /workspaces/gym-manager/php gym manager/views/auth/login.php
+--------------------------------------------------------------------------------
+<?php
+require_once __DIR__ . '/../layout/header.php';
+?>
+<div class="page-shell">
+    <div class="card" style="max-width: 400px; margin: 40px auto; text-align: center;">
+        <h2>Login</h2>
+        <p>Enter your credentials to manage your gym</p>
+        <form action="/login" method="POST" style="text-align: left; margin-top: 20px;">
+            <?= CSRF::field() ?>
+            <div style="margin-bottom: 15px;">
+                <label>Email</label>
+                <input type="email" name="email" required placeholder="email@example.com">
+            </div>
+            <div style="margin-bottom: 20px;">
+                <label>Password</label>
+                <input type="password" name="password" required placeholder="********">
+            </div>
+            <button type="submit" class="btn btn-primary">Sign In</button>
+        </form>
+    </div>
+</div>
+<?php
+require_once __DIR__ . '/../layout/footer.php';
+?>
+
+

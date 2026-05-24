@@ -15,9 +15,12 @@ class GymModel {
     }
 
     public function update(int $id, array $data): bool {
+        $allowed = ['gym_name', 'owner_name', 'owner_phone', 'gym_address', 'upi_id'];
+        $filteredData = array_intersect_key($data, array_flip($allowed));
+
         $fields = [];
         $params = [];
-        foreach ($data as $key => $val) {
+        foreach ($filteredData as $key => $val) {
             $fields[] = "$key = ?";
             $params[] = $val;
         }

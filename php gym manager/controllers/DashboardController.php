@@ -2,8 +2,10 @@
 class DashboardController {
     public function index(): void {
         Auth::guard('owner');
+        Auth::trialGuard();
         
         $userId = Auth::user()['id'];
+
         $db = Database::getInstance();
         
         // Check if gym exists

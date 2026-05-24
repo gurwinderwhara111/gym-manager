@@ -9,8 +9,13 @@ class MemberController {
     public function list(): void {
         Auth::guard('owner');
         $gymId = Auth::gymId();
+        
+        // Call runAutoDeadUpdate at the start of the list API to ensure fresh statuses
+        (new MemberModel())->runAutoDeadUpdate($gymId);
+
         $tab = Request::get('tab', 'all');
         $search = Request::get('search', '');
+
 
         $members = $this->memberModel->getAllByGym($gymId, $tab, $search);
         
@@ -107,13 +112,15 @@ class MemberController {
         Auth::guard('owner');
         CSRF::assertValid();
 
-        $id = (int)Request::post('id');
-        $gymId = Auth::gymId();
         $data = Request::json() ?? $_POST;
+        $id = (int)($data['id'] ?? 0);
+        $gymId = Auth::gymId();
         
+        if (!$id) Response::error('Member ID is required');
         if (!$data || !is_array($data)) {
             Response::error('No data provided for update');
         }
+
 
         unset($data['id']);
         $sanitizedData = [];
@@ -142,10 +149,14 @@ class MemberController {
         Auth::guard('owner');
         CSRF::assertValid();
 
-        $id = (int)Request::post('id');
+        $data = Request::json() ?? $_POST;
+        $id = (int)($data['id'] ?? 0);
         $gymId = Auth::gymId();
-        $months = (int)(Request::post('months') ?? 1);
-        $amountPaid = (float)(Request::post('amount_paid') ?? 0);
+        $months = (int)($data['months'] ?? 1);
+        $amountPaid = (float)($data['amount_paid'] ?? 0);
+
+        if (!$id) Response::error('Member ID is required');
+
 
         $db = Database::getInstance();
         $member = $db->fetch("SELECT * FROM members WHERE id = ? AND gym_id = ?", [$id, $gymId]);
@@ -190,13 +201,16 @@ class MemberController {
         Auth::guard('owner');
         CSRF::assertValid();
 
-        $id = (int)Request::post('id');
+        $data = Request::json() ?? $_POST;
+        $id = (int)($data['id'] ?? 0);
         $gymId = Auth::gymId();
-        $amount = (float)Request::post('amount');
+        $amount = (float)($data['amount'] ?? 0);
 
+        if (!$id) Response::error('Member ID is required');
         if ($amount <= 0) {
             Response::error('Invalid amount');
         }
+
 
         $db = Database::getInstance();
         $member = $db->fetch("SELECT * FROM members WHERE id = ? AND gym_id = ?", [$id, $gymId]);
@@ -221,10 +235,14 @@ class MemberController {
         Auth::guard('owner');
         CSRF::assertValid();
 
-        $id = (int)Request::post('id');
+        $data = Request::json() ?? $_POST;
+        $id = (int)($data['id'] ?? 0);
         $gymId = Auth::gymId();
 
+        if (!$id) Response::error('Member ID is required');
+
         if ($this->memberModel->markDead($id, $gymId)) {
+
             $db = Database::getInstance();
             $db->execute(
                 "INSERT INTO member_history (gym_id, member_id, event_type, event_date) VALUES (?, ?, 'marked_dead', date('now'))",

@@ -1,5 +1,5 @@
 <?php
-require_once __DIR__ . '/../views/layout/header.php';
+require_once __DIR__ . '/../layout/header.php';
 ?>
 <div class="page-shell">
     <header style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 24px;">

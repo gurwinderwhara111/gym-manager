@@ -12,10 +12,19 @@ class AnalyticsModel {
         
         $paymentModel = new PaymentModel();
         $thisMonthCollection = $paymentModel->getMonthlyTotal($gymId);
+        
+        $driver = $_ENV['DB_DRIVER'] ?? 'sqlite';
+        if ($driver === 'sqlite') {
+            $joinsSql = "SELECT COUNT(*) as c FROM members WHERE gym_id = ? AND joined_date >= date('now', 'start of month')";
+            $renewalsSql = "SELECT COUNT(*) as c FROM member_history WHERE gym_id = ? AND event_type = 'renewed' AND event_date >= date('now', 'start of month')";
+        } else {
+            $joinsSql = "SELECT COUNT(*) as c FROM members WHERE gym_id = ? AND joined_date >= DATE_FORMAT(NOW(), '%Y-%m-01')";
+            $renewalsSql = "SELECT COUNT(*) as c FROM member_history WHERE gym_id = ? AND event_type = 'renewed' AND event_date >= DATE_FORMAT(NOW(), '%Y-%m-01')";
+        }
 
-        $newJoins = $this->db->fetch("SELECT COUNT(*) as c FROM members WHERE gym_id = ? AND joined_date >= date('now', 'start of month')", [$gymId])['c'];
-        $renewals = $this->db->fetch("SELECT COUNT(*) as c FROM member_history WHERE gym_id = ? AND event_type = 'renewed' AND event_date >= date('now', 'start of month')", [$gymId])['c'];
-
+        $newJoins = $this->db->fetch($joinsSql, [$gymId])['c'];
+        $renewals = $this->db->fetch($renewalsSql, [$gymId])['c'];
+        
         return [
             'total_active' => $counts['active'],
             'total_overdue' => $counts['overdue'],

@@ -10,13 +10,16 @@ class PortalController {
 
         $db = Database::getInstance();
         $member = $db->fetch("SELECT * FROM members WHERE user_id = ? LIMIT 1", [$user['id']]);
-
         if (!$member) {
             require_once __DIR__ . '/../views/layout/header.php';
             echo '<div class="page-shell"><div class="card" style="text-align:center;"><h2>No Membership Found</h2><p>Please contact your gym owner to activate your portal access.</p></div></div>';
             require_once __DIR__ . '/../views/layout/footer.php';
             return;
         }
+
+        $gym = $db->fetch("SELECT g.gym_name FROM gyms g JOIN members m ON g.id = m.gym_id WHERE m.id = ?", [$member['id']]);
+        $gym_name = $gym['gym_name'] ?? 'My Gym';
+
 
         // Calculate days left
         $today = strtotime(date('Y-m-d'));
